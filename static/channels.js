@@ -300,6 +300,7 @@ function switchChannel(name) {
     localStorage.setItem('agentchattr-channel', name);
     filterMessagesByChannel();
     renderChannelTabs();
+    buildStatusPills();
     Store.set('activeChannel', name);
     // Restore: scroll to saved message, or bottom if none saved
     const savedId = _channelScrollMsg[name];

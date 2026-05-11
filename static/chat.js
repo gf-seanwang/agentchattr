@@ -10,6 +10,7 @@ let autoScroll = true;
 let reconnectTimer = null;
 let username = 'user';
 let agentConfig = {};  // { name: { color, label } } — registered instances (used for pills)
+let latestStatus = {}; // { name: { available, busy, label, color, role } } — live status from server
 let baseColors = {};   // { name: { color, label } } — base agent colors (for message coloring)
 let todos = {};  // { msg_id: "todo" | "done" }
 let rules = [];  // array of rule objects from server
@@ -1133,18 +1134,56 @@ document.addEventListener('keydown', (e) => {
 function buildStatusPills() {
     const container = document.getElementById('agent-status');
     container.innerHTML = '';
-    for (const [name, cfg] of Object.entries(agentConfig)) {
-        const pill = document.createElement('div');
-        pill.className = 'status-pill';
-        if (cfg.state === 'pending') pill.classList.add('pending');
-        pill.id = `status-${name}`;
-        pill.title = `@${name}`;  // Tooltip: canonical name for manual @-typing
-        pill.style.setProperty('--agent-color', colorOverrides[name] || cfg.color || '#4ade80');
-        pill.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(cfg.label || name)}</span>`;
-        // Left-click to toggle pill popover (rename + role + color)
+    const allowed = (window.channelAgents || {})[activeChannel];
+    const isGeneral = activeChannel === 'general';
+
+    if (!isGeneral && allowed) {
+        for (const name of allowed) {
+            const cfg = agentConfig[name] || null;
+            const status = latestStatus[name] || {};
+            _buildPill(container, name, cfg, status);
+        }
+    } else if (isGeneral) {
+        for (const [name, cfg] of Object.entries(agentConfig)) {
+            const status = latestStatus[name] || {};
+            _buildPill(container, name, cfg, status);
+        }
+    }
+    if (!container.dataset.dragScrollEnabled) {
+        enableDragScroll(container);
+        container.dataset.dragScrollEnabled = '1';
+    }
+}
+
+function _buildPill(container, name, cfg, status) {
+    const pill = document.createElement('div');
+    pill.className = 'status-pill';
+    pill.id = `status-${name}`;
+    pill.title = `@${name}`;
+
+    const isAvailable = !!status.available;
+    const isBusy = !!status.busy;
+
+    if (cfg && cfg.state === 'pending') {
+        pill.classList.add('pending');
+    } else if (isBusy && isAvailable) {
+        pill.classList.add('working');
+    } else if (isAvailable) {
+        pill.classList.add('available');
+    } else {
+        pill.classList.add('offline');
+    }
+
+    const color = isAvailable
+        ? (colorOverrides[name] || (cfg && cfg.color) || status.color || '#4ade80')
+        : '#888';
+    pill.style.setProperty('--agent-color', color);
+    const label = (cfg && cfg.label) || status.label || name;
+    pill.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(label)}</span>`;
+
+    if (cfg) {
         pill.addEventListener('click', (e) => {
             e.stopPropagation();
-            // Toggle: close if this pill's popover is already open
             const existing = document.querySelector(`.pill-popover[data-agent="${name}"]`);
             if (existing) { existing.remove(); return; }
             const mode = cfg.state === 'pending' ? 'pending' : 'rename';
@@ -1153,9 +1192,8 @@ function buildStatusPills() {
                 base: cfg.base || '', mode,
             });
         });
-        container.appendChild(pill);
     }
-    enableDragScroll(container);
+    container.appendChild(pill);
 }
 
 // --- Role presets (shared by pill popover + bubble picker) ---
@@ -1686,6 +1724,7 @@ const _ROLE_EMOJI = {
 };
 
 function updateStatus(data) {
+    latestStatus = data || {};
     for (const [name, info] of Object.entries(data)) {
         if (name === 'paused') continue;
         const pill = document.getElementById(`status-${name}`);
@@ -1712,6 +1751,7 @@ function updateStatus(data) {
             _syncBubbleRolePills(name);
         }
     }
+    buildStatusPills();
 }
 
 function updateTyping(agent, active) {
@@ -1779,6 +1819,9 @@ function applySettings(data) {
             pendingChannelSwitch = null;
             switchChannel(name);
         }
+    }
+    if (data.channel_agents || data.channels) {
+        buildStatusPills();
     }
 }
 

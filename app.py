@@ -1367,6 +1367,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             mcp_bridge.migrate_identity(agent_name, new_id)
                             # Update sender on all historical messages
                             store.rename_sender(agent_name, new_id)
+                            # Migrate channel_agents membership
+                            for members in room_settings.get("channel_agents", {}).values():
+                                for i, member in enumerate(list(members)):
+                                    if member == agent_name:
+                                        members[i] = new_id
+                            _save_settings()
                             # Notify clients so they can update sender in DOM
                             rename_event = json.dumps({
                                 "type": "agent_renamed",
@@ -1374,6 +1380,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "new_name": new_id,
                             })
                             await _broadcast(rename_event)
+                            await broadcast_settings()
                 continue
 
             elif event.get("type") == "name_pending":
