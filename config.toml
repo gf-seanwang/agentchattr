@@ -12,12 +12,14 @@ command = "claude"
 cwd = ".."
 color = "#da7756"
 label = "Claude"
+skills = ["compact", "config", "help", "model", "fast", "effort", "review", "init", "security-review"]
 
 [agents.codex]
 command = "codex"
 cwd = ".."
 color = "#10a37f"
 label = "Codex"
+skills = ["compact", "model", "fast", "help", "review", "explain"]
 
 [agents.gemini]
 command = "gemini"
