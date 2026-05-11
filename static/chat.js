@@ -125,13 +125,19 @@ async function interruptAgent(name) {
 }
 
 function findLatestMessageFromAgent(name) {
+    const cfg = agentConfig[name];
+    const matchNames = new Set([name]);
+    if (cfg) {
+        if (cfg.label) matchNames.add(cfg.label);
+        if (cfg.base) matchNames.add(cfg.base);
+    }
     const messages = Array.from(document.querySelectorAll('.message[data-id]'));
     for (let i = messages.length - 1; i >= 0; i--) {
         const el = messages[i];
         if (el.classList.contains('system-msg') || el.classList.contains('join-msg') || el.classList.contains('summary-msg')) continue;
         if ((el.dataset.channel || 'general') !== activeChannel) continue;
         const sender = el.querySelector('.msg-sender')?.textContent?.trim();
-        if (sender === name) return el;
+        if (matchNames.has(sender)) return el;
     }
     return null;
 }
