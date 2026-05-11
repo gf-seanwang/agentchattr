@@ -52,6 +52,7 @@ room_settings: dict = {
     "username": "user",
     "font": "sans",
     "channels": ["general"],
+    "channel_agents": {},
     "history_limit": "all",
     "contrast": "normal",
     "custom_roles": [],
@@ -826,12 +827,17 @@ async def _handle_new_message(msg: dict):
     allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
 
     import mcp_bridge
+    channel_allowed = room_settings.get("channel_agents", {}).get(channel)
     for target in targets:
         # Skip pending instances — they haven't been named/claimed yet
         if registry:
             inst = registry.get_instance(target)
             if inst and inst.get("state") == "pending":
                 continue
+        # Channel agent restriction: if channel has an agents list, only those can be triggered
+        if channel_allowed and target not in channel_allowed:
+            store.add("system", f"{target} is not in #{channel}.", msg_type="system", channel=channel)
+            continue
         # Session guard: suppress out-of-turn agent triggers
         if allowed_agent and target != allowed_agent:
             continue
@@ -1107,6 +1113,58 @@ async def websocket_endpoint(websocket: WebSocket):
                         router.continue_routing()
                         store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
                         await broadcast_status()
+                        continue
+                    if cmd == "/stop":
+                        target = cmd_parts[1].lstrip("@") if len(cmd_parts) > 1 else None
+                        if target:
+                            import subprocess as _sp
+                            sessions = [f"agentchattr-{target}", f"agentchattr-{target}-2"]
+                            stopped = False
+                            for sess in sessions:
+                                try:
+                                    _sp.run(["tmux", "send-keys", "-t", sess, "Escape"], capture_output=True, timeout=3)
+                                    stopped = True
+                                    break
+                                except Exception:
+                                    pass
+                            if stopped:
+                                store.add("system", f"Interrupted {target}.", msg_type="system", channel=channel)
+                            else:
+                                store.add("system", f"Could not find session for {target}.", msg_type="system", channel=channel)
+                        else:
+                            store.add("system", "Usage: /stop @agent-name", msg_type="system", channel=channel)
+                        continue
+                    if cmd == "/invite":
+                        target = cmd_parts[1].lstrip("@") if len(cmd_parts) > 1 else None
+                        if target:
+                            ca = room_settings.setdefault("channel_agents", {})
+                            members = ca.setdefault(channel, [])
+                            if target not in members:
+                                members.append(target)
+                                _save_settings()
+                                await broadcast_settings()
+                                store.add("system", f"{target} joined #{channel}.", msg_type="system", channel=channel)
+                            else:
+                                store.add("system", f"{target} is already in #{channel}.", msg_type="system", channel=channel)
+                        else:
+                            store.add("system", "Usage: /invite @agent-name", msg_type="system", channel=channel)
+                        continue
+                    if cmd == "/kick":
+                        target = cmd_parts[1].lstrip("@") if len(cmd_parts) > 1 else None
+                        if target:
+                            ca = room_settings.get("channel_agents", {})
+                            members = ca.get(channel, [])
+                            if target in members:
+                                members.remove(target)
+                                if not members:
+                                    ca.pop(channel, None)
+                                _save_settings()
+                                await broadcast_settings()
+                                store.add("system", f"{target} removed from #{channel}.", msg_type="system", channel=channel)
+                            else:
+                                store.add("system", f"{target} is not in #{channel}.", msg_type="system", channel=channel)
+                        else:
+                            store.add("system", "Usage: /kick @agent-name", msg_type="system", channel=channel)
                         continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.

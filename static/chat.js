@@ -1760,6 +1760,9 @@ function applySettings(data) {
     if (Array.isArray(data.custom_roles)) {
         window.customRoles = data.custom_roles;
     }
+    if (data.channel_agents) {
+        window.channelAgents = data.channel_agents;
+    }
     if (data.channels && Array.isArray(data.channels)) {
         channelList = data.channels;
         // If active channel was deleted, switch to general
@@ -2045,6 +2048,9 @@ const SLASH_COMMANDS = [
     { cmd: '/poetry sonnet', desc: 'Agents write a sonnet about the codebase', broadcast: true },
     { cmd: '/summary', desc: 'Summarize recent messages — tag an agent (e.g. /summary @claude)', broadcast: false, needsMention: true },
     { cmd: '/summarise', desc: 'Summarize recent messages — tag an agent (e.g. /summarise @claude)', broadcast: false, needsMention: true, hidden: true },
+    { cmd: '/stop', desc: 'Interrupt an agent — e.g. /stop @claude-rummy', broadcast: false },
+    { cmd: '/invite', desc: 'Add an agent to this channel — e.g. /invite @claude-rummy', broadcast: false },
+    { cmd: '/kick', desc: 'Remove an agent from this channel — e.g. /kick @claude-rummy', broadcast: false },
     { cmd: '/continue', desc: 'Resume after loop guard pauses', broadcast: false },
     { cmd: '/clear', desc: 'Clear messages in current channel', broadcast: false },
 ];
@@ -2107,11 +2113,21 @@ function selectSlashCommand(cmd) {
 function getMentionCandidates() {
     // Build list: registered agents + "all agents" + username (self) + known humans
     const candidates = [];
+    const allowed = (window.channelAgents || {})[activeChannel];
+    const input = document.getElementById('input');
+    const isInviteCmd = input && /^\/invite\s/.test(input.value);
     for (const [name, cfg] of Object.entries(agentConfig)) {
         if (cfg.state === 'pending') continue;
+        if (isInviteCmd) {
+            if (allowed && allowed.includes(name)) continue;
+        } else {
+            if (allowed && !allowed.includes(name)) continue;
+        }
         candidates.push({ name, label: cfg.label || name, color: cfg.color });
     }
-    candidates.push({ name: 'all agents', label: 'all agents', color: 'var(--accent)' });
+    if (!isInviteCmd) {
+        candidates.push({ name: 'all agents', label: 'all agents', color: 'var(--accent)' });
+    }
     return candidates;
 }
 
@@ -2222,7 +2238,7 @@ function setupInput() {
                 items.forEach((el, i) => el.classList.toggle('active', i === mentionMenuIndex));
                 return;
             }
-            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
                 e.preventDefault();
                 const active = items[mentionMenuIndex];
                 if (active) {
@@ -2230,6 +2246,7 @@ function setupInput() {
                 }
                 return;
             }
+            if (e.isComposing) return;
             if (e.key === 'Escape') {
                 menu.classList.add('hidden');
                 mentionMenuVisible = false;
@@ -2251,7 +2268,7 @@ function setupInput() {
                 items.forEach((el, i) => el.classList.toggle('active', i === slashMenuIndex));
                 return;
             }
-            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
                 e.preventDefault();
                 const active = items[slashMenuIndex];
                 if (active) selectSlashCommand(active.querySelector('.slash-cmd').textContent);
@@ -2264,7 +2281,7 @@ function setupInput() {
                 return;
             }
         }
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
             e.preventDefault();
             sendMessage();
         }
