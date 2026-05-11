@@ -23,6 +23,32 @@ let soundEnabled = false;  // suppress sounds during initial history load
 let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
+let inputHistory = JSON.parse(localStorage.getItem('agentchattr-input-history') || '{}');
+let historyIndex = -1;
+let historyDraft = '';
+let historyChannel = '';
+let historyNavigating = false;
+
+function resetInputHistoryNav() {
+    historyIndex = -1;
+    historyDraft = '';
+    historyChannel = activeChannel;
+}
+function ensureHistoryChannel() {
+    if (historyChannel !== activeChannel) resetInputHistoryNav();
+}
+function recordInputHistory(rawText, channel) {
+    if (!rawText) return;
+    if (!Array.isArray(inputHistory[channel])) inputHistory[channel] = [];
+    if (inputHistory[channel][inputHistory[channel].length - 1] !== rawText) {
+        inputHistory[channel].push(rawText);
+    }
+    if (inputHistory[channel].length > 10) {
+        inputHistory[channel] = inputHistory[channel].slice(-10);
+    }
+    localStorage.setItem('agentchattr-input-history', JSON.stringify(inputHistory));
+    resetInputHistoryNav();
+}
 let agentHats = {};  // { agent_name: svg_string }
 window.customRoles = [];  // saved custom roles from settings
 let colorOverrides = JSON.parse(localStorage.getItem('agentchattr-color-overrides') || '{}');
@@ -2327,6 +2353,48 @@ function setupInput() {
                 return;
             }
         }
+        // Input history: ↑/↓ to browse previous messages
+        ensureHistoryChannel();
+        if (
+            e.key === 'ArrowUp' &&
+            !mentionMenuVisible && !slashMenuVisible && !e.isComposing &&
+            input.selectionStart === input.selectionEnd &&
+            !input.value.slice(0, input.selectionStart).includes('\n')
+        ) {
+            const hist = inputHistory[activeChannel] || [];
+            if (hist.length === 0) return;
+            if (historyIndex === -1) {
+                historyDraft = input.value;
+                historyIndex = hist.length - 1;
+            } else if (historyIndex > 0) {
+                historyIndex--;
+            }
+            historyNavigating = true;
+            input.value = hist[historyIndex];
+            e.preventDefault();
+            onInputChange();
+            return;
+        }
+        if (
+            e.key === 'ArrowDown' &&
+            !mentionMenuVisible && !slashMenuVisible && !e.isComposing &&
+            input.selectionStart === input.selectionEnd &&
+            historyIndex !== -1
+        ) {
+            const hist = inputHistory[activeChannel] || [];
+            if (historyIndex < hist.length - 1) {
+                historyIndex++;
+                input.value = hist[historyIndex];
+            } else {
+                historyIndex = -1;
+                input.value = historyDraft;
+                historyDraft = '';
+            }
+            historyNavigating = true;
+            e.preventDefault();
+            onInputChange();
+            return;
+        }
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
             e.preventDefault();
             sendMessage();
@@ -2335,6 +2403,11 @@ function setupInput() {
 
     // Auto-resize + slash menu + mention menu + send button state
     function onInputChange() {
+        if (!historyNavigating) {
+            historyIndex = -1;
+            historyDraft = '';
+        }
+        historyNavigating = false;
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         updateSlashMenu(input.value);
@@ -2420,6 +2493,7 @@ function sendMessage() {
         ws.send(JSON.stringify(payload));
     }
 
+    recordInputHistory(input.value.trim(), activeChannel);
     input.value = '';
     input.style.height = 'auto';
     clearAttachments();
