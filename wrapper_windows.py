@@ -257,7 +257,7 @@ def get_activity_checker(pid_holder, agent_name="unknown", trigger_flag=None):
     return check
 
 
-def run_agent(command, extra_args, cwd, env, queue_file, agent, no_restart, start_watcher, strip_env=None, pid_holder=None, session_name=None, inject_env=None, inject_delay: float = 0.3, enter_backend: str = "console_input"):
+def run_agent(command, extra_args, cwd, env, queue_file, agent, no_restart, start_watcher, strip_env=None, pid_holder=None, session_name=None, inject_env=None, inject_delay: float = 0.3, enter_backend: str = "console_input", restart_event=None):
     """Run agent as a direct subprocess, inject via Win32 console."""
     if inject_env:
         env = {**env, **inject_env}
@@ -268,9 +268,21 @@ def run_agent(command, extra_args, cwd, env, queue_file, agent, no_restart, star
             proc = subprocess.Popen([command] + extra_args, cwd=cwd, env=env)
             if pid_holder is not None:
                 pid_holder[0] = proc.pid
-            proc.wait()
+            while proc.poll() is None:
+                if restart_event is not None and restart_event.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    break
+                time.sleep(0.5)
             if pid_holder is not None:
                 pid_holder[0] = None
+
+            if restart_event is not None and restart_event.is_set():
+                break
 
             if no_restart:
                 break

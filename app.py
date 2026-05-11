@@ -804,6 +804,15 @@ async def _handle_new_message(msg: dict):
             targets.append(t)
     targets = list(dict.fromkeys(targets))  # dedupe, preserve order
 
+    # Compute explicit @mentions (resolved through registry) for channel restriction warnings
+    raw_explicit = router.parse_mentions(text)
+    explicit_mentions = set()
+    for t in raw_explicit:
+        if registry:
+            explicit_mentions.update(registry.resolve_to_instances(t))
+        else:
+            explicit_mentions.add(t)
+
     if router.is_paused(channel):
         # Only emit the loop guard notice once per pause
         if not router.is_guard_emitted(channel):
@@ -834,10 +843,12 @@ async def _handle_new_message(msg: dict):
             inst = registry.get_instance(target)
             if inst and inst.get("state") == "pending":
                 continue
-        # Channel agent restriction: if channel has an agents list, only those can be triggered
-        if channel_allowed and target not in channel_allowed:
-            store.add("system", f"{target} is not in #{channel}.", msg_type="system", channel=channel)
-            continue
+        # Channel agent restriction: #general is open to all; other channels require /invite
+        if channel != "general":
+            if channel_allowed is None or target not in channel_allowed:
+                if target in explicit_mentions:
+                    store.add("system", f"{target} is not in #{channel}.", msg_type="system", channel=channel)
+                continue
         # Session guard: suppress out-of-turn agent triggers
         if allowed_agent and target != allowed_agent:
             continue

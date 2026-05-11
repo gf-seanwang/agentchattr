@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -93,6 +94,7 @@ def run_agent(
     session_name=None,
     inject_env=None,
     inject_delay: float = 0.3,
+    restart_event=None,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -130,6 +132,19 @@ def run_agent(
     print(f"  Reattach: tmux attach -t {session_name}\n")
 
     while True:
+        monitor_stop = threading.Event()
+
+        def monitor_restart():
+            if restart_event is None:
+                return
+            while not monitor_stop.is_set():
+                if restart_event.wait(0.5):
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", session_name],
+                        capture_output=True,
+                    )
+                    return
+
         try:
             # Clean up stale session from a previous crash
             subprocess.run(
@@ -147,8 +162,14 @@ def run_agent(
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
 
+            if restart_event is not None:
+                threading.Thread(target=monitor_restart, daemon=True).start()
+
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
             subprocess.run(["tmux", "attach-session", "-t", session_name])
+
+            if restart_event is not None and restart_event.is_set():
+                break
 
             # Check: did the agent exit, or did the user just detach?
             if _session_exists(session_name):
@@ -157,6 +178,12 @@ def run_agent(
                 print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
                 print(f"  Reattach: tmux attach -t {session_name}")
                 while _session_exists(session_name):
+                    if restart_event is not None and restart_event.is_set():
+                        subprocess.run(
+                            ["tmux", "kill-session", "-t", session_name],
+                            capture_output=True,
+                        )
+                        break
                     time.sleep(1)
                 break
 
@@ -174,3 +201,5 @@ def run_agent(
                 capture_output=True,
             )
             break
+        finally:
+            monitor_stop.set()

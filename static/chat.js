@@ -2114,14 +2114,17 @@ function getMentionCandidates() {
     // Build list: registered agents + "all agents" + username (self) + known humans
     const candidates = [];
     const allowed = (window.channelAgents || {})[activeChannel];
+    const isGeneral = activeChannel === 'general';
     const input = document.getElementById('input');
     const isInviteCmd = input && /^\/invite\s/.test(input.value);
     for (const [name, cfg] of Object.entries(agentConfig)) {
         if (cfg.state === 'pending') continue;
-        if (isInviteCmd) {
-            if (allowed && allowed.includes(name)) continue;
-        } else {
-            if (allowed && !allowed.includes(name)) continue;
+        if (!isGeneral) {
+            if (isInviteCmd) {
+                if (allowed && allowed.includes(name)) continue;
+            } else {
+                if (!allowed || !allowed.includes(name)) continue;
+            }
         }
         candidates.push({ name, label: cfg.label || name, color: cfg.color });
     }

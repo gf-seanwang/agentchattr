@@ -453,12 +453,12 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
-                   refresh_interval: int = 10):
+                   refresh_interval: int = 10, stop_event=None):
     """Poll queue file and inject an MCP read task when triggered."""
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
             _, queue_file = get_identity_fn()
             if queue_file.exists() and queue_file.stat().st_size > 0:
@@ -594,8 +594,26 @@ def main():
     server_port = config.get("server", {}).get("port", 8300)
     mcp_cfg = config.get("mcp", {})
 
+    def _register_with_retry(server_port, agent, label, max_wait=300):
+        """Try to register with the server, retrying on failure."""
+        wait = 3
+        elapsed = 0
+        while True:
+            try:
+                return _register_instance(server_port, agent, label)
+            except Exception as exc:
+                if elapsed >= max_wait:
+                    print(f"  Registration failed after {elapsed}s ({exc}).")
+                    sys.exit(1)
+                print(f"  Server not ready ({exc}), retrying in {wait}s...")
+                time.sleep(wait)
+                elapsed += wait
+                wait = min(wait * 2, 30)
+
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_with_retry(server_port, agent, args.label)
+    except SystemExit:
+        raise
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -741,6 +759,8 @@ def main():
     print(f"  @{assigned_name} mentions auto-inject MCP reads")
     print(f"  Starting {command} in {cwd}...\n")
 
+    _agent_restart_event = threading.Event()
+
     def _heartbeat():
         while True:
             current_name, _ = get_identity()
@@ -757,12 +777,14 @@ def main():
                     resp_data = json.loads(resp.read())
                 server_name = resp_data.get("name", current_name)
                 if server_name != current_name:
-                    set_runtime_identity(server_name)
+                    if set_runtime_identity(server_name) and not needs_proxy:
+                        _agent_restart_event.set()
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
                         replacement = _register_instance(server_port, agent, args.label)
-                        set_runtime_identity(replacement["name"], replacement["token"])
+                        if set_runtime_identity(replacement["name"], replacement["token"]) and not needs_proxy:
+                            _agent_restart_event.set()
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
                         pass
@@ -778,34 +800,44 @@ def main():
 
     _watcher_inject_fn = None
     _watcher_thread = None
+    _watcher_stop = None
     _is_multi_instance = registration.get("slot", 1) > 1
     _trigger_flag = [False]  # shared: queue watcher sets True, activity checker reads
     _refresh_interval = 10  # default; overridden per-trigger by server settings
 
     def start_watcher(inject_fn):
-        nonlocal _watcher_inject_fn, _watcher_thread
+        nonlocal _watcher_inject_fn, _watcher_thread, _watcher_stop
+        # Stop previous watcher if still running
+        if _watcher_stop is not None:
+            _watcher_stop.set()
+        _watcher_stop = threading.Event()
         _watcher_inject_fn = inject_fn
         _watcher_thread = threading.Thread(
             target=_queue_watcher,
             args=(get_identity, inject_fn),
             kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                     "server_port": server_port, "agent_name": assigned_name,
-                    "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+                    "get_token_fn": get_token, "refresh_interval": _refresh_interval,
+                    "stop_event": _watcher_stop},
             daemon=True,
         )
         _watcher_thread.start()
 
     def _watcher_monitor():
-        nonlocal _watcher_thread
+        nonlocal _watcher_thread, _watcher_stop
         while True:
             time.sleep(5)
             if _watcher_thread and not _watcher_thread.is_alive() and _watcher_inject_fn:
+                if _watcher_stop and _watcher_stop.is_set():
+                    continue
+                _watcher_stop = threading.Event()
                 _watcher_thread = threading.Thread(
                     target=_queue_watcher,
                     args=(get_identity, _watcher_inject_fn),
                     kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
                             "server_port": server_port, "agent_name": assigned_name,
-                            "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+                            "get_token_fn": get_token, "refresh_interval": _refresh_interval,
+                            "stop_event": _watcher_stop},
                     daemon=True,
                 )
                 _watcher_thread.start()
@@ -884,6 +916,7 @@ def main():
         pid_holder=_agent_pid,
         inject_env=inject_env,
         inject_delay=agent_cfg.get("inject_delay", 0.3),
+        restart_event=_agent_restart_event,
     )
     # Windows-only injection tuning (no-op on other platforms).
     if sys.platform == "win32":
@@ -891,9 +924,88 @@ def main():
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
 
-    try:
-        run_agent(**run_kwargs)
-    finally:
+    def rebuild_launch_for_current_identity():
+        nonlocal env, inject_env, mcp_settings_path, unix_session_name
+        current_name, _ = get_identity()
+        new_launch_args, new_env, new_inject_env, new_mcp_settings_path = _build_provider_launch(
+            agent=agent, agent_cfg=agent_cfg, instance_name=current_name,
+            data_dir=data_dir, proxy_url=proxy_url, extra_args=extra,
+            env={k: v for k, v in os.environ.items() if k not in strip_vars},
+            token=get_token(), mcp_cfg=mcp_cfg, project_dir=project_dir,
+        )
+        env = new_env
+        inject_env = new_inject_env
+        mcp_settings_path = new_mcp_settings_path
+        run_kwargs["extra_args"] = new_launch_args
+        run_kwargs["env"] = env
+        run_kwargs["inject_env"] = inject_env
+        if sys.platform == "win32":
+            _set_activity_checker(get_activity_checker(_agent_pid, agent_name=current_name, trigger_flag=_trigger_flag))
+        else:
+            unix_session_name = f"agentchattr-{current_name}"
+            run_kwargs["session_name"] = unix_session_name
+            _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
+        return current_name
+
+    while True:
+        try:
+            run_agent(**run_kwargs)
+        except Exception as exc:
+            print(f"\n  Agent exited unexpectedly: {exc}")
+
+        if _agent_restart_event.is_set():
+            _agent_restart_event.clear()
+            if _watcher_stop is not None:
+                _watcher_stop.set()
+            current_name = rebuild_launch_for_current_identity()
+            print(f"  Restarting agent session with refreshed credentials for @{current_name}...")
+            continue
+
+        # Check if server is still alive — if not, wait for it to come back
+        server_alive = False
+        try:
+            current_name, _ = get_identity()
+            check_req = urllib.request.Request(
+                f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}",
+                method="POST", data=b"",
+                headers=_auth_headers(get_token()),
+            )
+            urllib.request.urlopen(check_req, timeout=3)
+            server_alive = True
+        except Exception:
+            pass
+
+        def stop_wrapper():
+            if _watcher_stop is not None:
+                _watcher_stop.set()
+            if proxy is not None:
+                proxy.stop()
+            print("  Wrapper stopped.")
+
+        if not server_alive:
+            if args.no_restart:
+                print("\n  Server disconnected. --no-restart set, exiting.")
+                stop_wrapper()
+                break
+            print("\n  Server disconnected. Waiting for server to come back...")
+            if _watcher_stop is not None:
+                _watcher_stop.set()
+            wait = 3
+            while True:
+                try:
+                    re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
+                    set_runtime_identity(re_reg["name"], re_reg["token"])
+                    print(f"  Reconnected as: {re_reg['name']}")
+                    break
+                except SystemExit:
+                    pass
+                time.sleep(wait)
+                wait = min(wait * 2, 30)
+            # Rebuild launch args with new token/identity
+            rebuild_launch_for_current_identity()
+            continue
+
+        # Server is alive but agent exited normally — clean shutdown
         try:
             current_name, _ = get_identity()
             current_token = get_token()
@@ -908,10 +1020,8 @@ def main():
         except Exception:
             pass
 
-        if proxy is not None:
-            proxy.stop()
-
-    print("  Wrapper stopped.")
+        stop_wrapper()
+        break
 
 
 if __name__ == "__main__":
