@@ -111,10 +111,10 @@ function selectSkill(skill) {
 
 async function refreshSkills() {
     try {
-        const resp = await fetch('/api/skills');
-        const data = await resp.json();
-        agentSkills = data;
-        localStorage.setItem('agentchattr-agent-skills', JSON.stringify(agentSkills));
+        await fetch('/api/skills/refresh', {
+            method: 'POST',
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
     } catch (e) {
         console.error('Failed to refresh skills:', e);
     }

@@ -16,6 +16,46 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_SKILL_SCAN_PATHS = {
+    "claude": {
+        "plugin_dir": Path.home() / ".claude" / "plugins" / "cache",
+        "user_dir": Path.home() / ".claude" / "skills",
+    },
+}
+
+
+def _resolve_provider(cfg: dict, base_name: str) -> str:
+    return cfg.get("skill_provider") or Path(cfg.get("command", base_name)).name
+
+
+def discover_skills(provider: str) -> list[str]:
+    paths = _SKILL_SCAN_PATHS.get(provider, {})
+    skills: list[str] = []
+    plugin_dir = paths.get("plugin_dir")
+    if plugin_dir and plugin_dir.exists():
+        try:
+            for skill_file in plugin_dir.rglob("skills/*/SKILL.md"):
+                parts = skill_file.relative_to(plugin_dir).parts
+                if len(parts) >= 6:
+                    plugin = parts[1]
+                    skill_name = parts[4]
+                    skills.append(f"{plugin}:{skill_name}")
+        except OSError:
+            pass
+    user_dir = paths.get("user_dir")
+    if user_dir and user_dir.exists():
+        try:
+            for skill_file in user_dir.glob("*/SKILL.md"):
+                skills.append(skill_file.parent.name)
+        except OSError:
+            pass
+    return sorted(set(skills))
+
+
+def _merge_skills(discovered: list[str], configured: list[str]) -> list[str]:
+    return list(dict.fromkeys([*discovered, *configured]))
+
+
 @dataclass
 class Instance:
     """A live agent instance."""
@@ -48,9 +88,37 @@ class RuntimeRegistry:
 
     def seed(self, agents_config: dict):
         """Load base templates from config.toml [agents.*] section."""
+        base_items = {}
+        for name, cfg in agents_config.items():
+            base_items[name] = dict(cfg)
+        # Scan skills outside lock
+        for name, cfg in base_items.items():
+            provider = _resolve_provider(cfg, name)
+            discovered = discover_skills(provider)
+            cfg["_config_skills"] = list(cfg.get("skills", []))
+            cfg["_discovered_skills"] = discovered
+            cfg["skills"] = _merge_skills(discovered, cfg["_config_skills"])
         with self._lock:
-            for name, cfg in agents_config.items():
-                self._bases[name] = dict(cfg)
+            for name, cfg in base_items.items():
+                self._bases[name] = cfg
+
+    def refresh_skills(self):
+        """Re-scan all base agents' skills from filesystem."""
+        with self._lock:
+            base_items = {name: dict(cfg) for name, cfg in self._bases.items()}
+        updates = {}
+        for name, cfg in base_items.items():
+            provider = _resolve_provider(cfg, name)
+            discovered = discover_skills(provider)
+            updates[name] = discovered
+        with self._lock:
+            for name, discovered in updates.items():
+                cfg = self._bases.get(name)
+                if not cfg:
+                    continue
+                config_skills = cfg.get("_config_skills", [])
+                cfg["_discovered_skills"] = discovered
+                cfg["skills"] = _merge_skills(discovered, config_skills)
 
     def on_change(self, cb):
         """Register a callback fired after any registry mutation."""
