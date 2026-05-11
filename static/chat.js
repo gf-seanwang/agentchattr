@@ -23,6 +23,12 @@ let soundEnabled = false;  // suppress sounds during initial history load
 let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
+let agentSkills = JSON.parse(localStorage.getItem('agentchattr-agent-skills') || '{}');
+let skillMenuVisible = false;
+let skillMenuIndex = 0;
+let skillMenuAgent = '';
+let skillMenuStart = -1;
+let skillMenuEnd = -1;
 let inputHistory = JSON.parse(localStorage.getItem('agentchattr-input-history') || '{}');
 let historyIndex = -1;
 let historyDraft = '';
@@ -37,6 +43,83 @@ function resetInputHistoryNav() {
 function ensureHistoryChannel() {
     if (historyChannel !== activeChannel) resetInputHistoryNav();
 }
+function updateSkillMenu() {
+    const input = document.getElementById('input');
+    const menu = document.getElementById('skill-menu');
+    if (mentionMenuVisible || slashMenuVisible) {
+        menu.classList.add('hidden');
+        skillMenuVisible = false;
+        return;
+    }
+    const cursor = input.selectionStart;
+    const beforeCursor = input.value.slice(0, cursor);
+    const match = beforeCursor.match(/(?:^|\s)@([\w-]+)\s+\/([\w-]*)$/);
+    if (!match) {
+        menu.classList.add('hidden');
+        skillMenuVisible = false;
+        return;
+    }
+    const agentName = match[1].toLowerCase();
+    const query = match[2].toLowerCase();
+    const skills = agentSkills[agentName] || [];
+    if (skills.length === 0) {
+        menu.classList.add('hidden');
+        skillMenuVisible = false;
+        return;
+    }
+    const matches = skills.filter(s => s.toLowerCase().includes(query));
+    if (matches.length === 0) {
+        menu.classList.add('hidden');
+        skillMenuVisible = false;
+        return;
+    }
+    skillMenuAgent = agentName;
+    skillMenuStart = beforeCursor.lastIndexOf('/');
+    skillMenuEnd = cursor;
+    menu.innerHTML = '';
+    skillMenuIndex = Math.min(skillMenuIndex, matches.length - 1);
+    matches.forEach((skill, i) => {
+        const row = document.createElement('div');
+        row.className = 'slash-item' + (i === skillMenuIndex ? ' active' : '');
+        row.innerHTML = `<span class="slash-cmd">/${escapeHtml(skill)}</span>`;
+        row.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            selectSkill(skill);
+        });
+        row.addEventListener('mouseenter', () => {
+            skillMenuIndex = i;
+            menu.querySelectorAll('.slash-item').forEach((el, j) => el.classList.toggle('active', j === i));
+        });
+        menu.appendChild(row);
+    });
+    menu.classList.remove('hidden');
+    skillMenuVisible = true;
+}
+
+function selectSkill(skill) {
+    const input = document.getElementById('input');
+    const before = input.value.slice(0, skillMenuStart);
+    const after = input.value.slice(skillMenuEnd);
+    const replacement = `/${skill} `;
+    input.value = before + replacement + after;
+    const newPos = before.length + replacement.length;
+    input.setSelectionRange(newPos, newPos);
+    input.focus();
+    document.getElementById('skill-menu').classList.add('hidden');
+    skillMenuVisible = false;
+}
+
+async function refreshSkills() {
+    try {
+        const resp = await fetch('/api/skills');
+        const data = await resp.json();
+        agentSkills = data;
+        localStorage.setItem('agentchattr-agent-skills', JSON.stringify(agentSkills));
+    } catch (e) {
+        console.error('Failed to refresh skills:', e);
+    }
+}
+
 function recordInputHistory(rawText, channel) {
     if (!rawText) return;
     if (!Array.isArray(inputHistory[channel])) inputHistory[channel] = [];
@@ -972,9 +1055,16 @@ function repositionScrollAnchor() {
 
 function applyAgentConfig(data) {
     agentConfig = {};
+    const nextSkills = {};
     for (const [name, cfg] of Object.entries(data)) {
-        agentConfig[name.toLowerCase()] = cfg;
+        const key = name.toLowerCase();
+        agentConfig[key] = cfg;
+        if (Array.isArray(cfg.skills) && cfg.skills.length > 0) {
+            nextSkills[key] = cfg.skills;
+        }
     }
+    agentSkills = nextSkills;
+    localStorage.setItem('agentchattr-agent-skills', JSON.stringify(agentSkills));
     buildStatusPills();
     buildMentionToggles();
     buildSoundSettings();
@@ -2353,6 +2443,33 @@ function setupInput() {
                 return;
             }
         }
+        if (skillMenuVisible) {
+            const menu = document.getElementById('skill-menu');
+            const items = menu.querySelectorAll('.slash-item');
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                skillMenuIndex = (skillMenuIndex - 1 + items.length) % items.length;
+                items.forEach((el, i) => el.classList.toggle('active', i === skillMenuIndex));
+                return;
+            }
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                skillMenuIndex = (skillMenuIndex + 1) % items.length;
+                items.forEach((el, i) => el.classList.toggle('active', i === skillMenuIndex));
+                return;
+            }
+            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
+                e.preventDefault();
+                const active = items[skillMenuIndex];
+                if (active) selectSkill(active.textContent.slice(1));
+                return;
+            }
+            if (e.key === 'Escape') {
+                menu.classList.add('hidden');
+                skillMenuVisible = false;
+                return;
+            }
+        }
         // Input history: ↑/↓ to browse previous messages
         ensureHistoryChannel();
         if (
@@ -2412,6 +2529,7 @@ function setupInput() {
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         updateSlashMenu(input.value);
         updateMentionMenu();
+        updateSkillMenu();
         updateSendButton();
     }
     input.addEventListener('input', onInputChange);

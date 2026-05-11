@@ -3759,7 +3759,8 @@ footer {
 
 /* --- Slash command menu --- */
 
-#slash-menu {
+#slash-menu,
+#skill-menu {
     position: absolute;
     bottom: 100%;
     left: 16px;
@@ -3774,7 +3775,8 @@ footer {
     z-index: 20;
 }
 
-#slash-menu.hidden { display: none; }
+#slash-menu.hidden,
+#skill-menu.hidden { display: none; }
 
 .slash-item {
     display: flex;

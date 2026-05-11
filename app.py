@@ -185,7 +185,7 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
+            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles", "/api/skills")):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -2102,6 +2102,16 @@ async def set_agent_role(agent_name: str, request: Request):
     mcp_bridge.set_role(agent_name, role)
     await broadcast_status()
     return JSONResponse({"ok": True, "role": role})
+
+
+# --- Skills API ---
+
+@app.get("/api/skills")
+async def get_skills():
+    if not registry:
+        return JSONResponse({})
+    cfg = registry.get_agent_config()
+    return JSONResponse({name: info.get("skills", []) for name, info in cfg.items()})
 
 
 # --- Rules API ---
