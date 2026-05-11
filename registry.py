@@ -21,6 +21,9 @@ _SKILL_SCAN_PATHS = {
         "plugin_dir": Path.home() / ".claude" / "plugins" / "cache",
         "user_dir": Path.home() / ".claude" / "skills",
     },
+    "codex": {
+        "user_dir": Path.home() / ".codex" / "skills",
+    },
 }
 
 
@@ -53,7 +56,7 @@ def discover_skills(provider: str) -> list[str]:
     user_dir = paths.get("user_dir")
     if user_dir and user_dir.exists():
         try:
-            for skill_file in user_dir.glob("*/SKILL.md"):
+            for skill_file in user_dir.rglob("SKILL.md"):
                 skills.append(skill_file.parent.name)
         except OSError:
             pass
