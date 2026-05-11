@@ -760,6 +760,8 @@ def main():
     print(f"  Starting {command} in {cwd}...\n")
 
     _agent_restart_event = threading.Event()
+    _runtime_session = [""]
+    _runtime_backend = [""]
 
     def _heartbeat():
         while True:
@@ -767,11 +769,15 @@ def main():
             current_token = get_token()
             url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
             try:
+                hb_data = {}
+                if _runtime_session[0]:
+                    hb_data["runtime_session"] = _runtime_session[0]
+                    hb_data["runtime_backend"] = _runtime_backend[0]
                 req = urllib.request.Request(
                     url,
                     method="POST",
-                    data=b"",
-                    headers=_auth_headers(current_token),
+                    data=json.dumps(hb_data).encode() if hb_data else b"",
+                    headers={**_auth_headers(current_token), "Content-Type": "application/json"} if hb_data else _auth_headers(current_token),
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resp_data = json.loads(resp.read())
@@ -902,6 +908,8 @@ def main():
 
         unix_session_name = f"agentchattr-{assigned_name}"
         _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
+        _runtime_session[0] = unix_session_name
+        _runtime_backend[0] = "tmux"
 
     run_kwargs = dict(
         command=command,
@@ -945,6 +953,8 @@ def main():
             unix_session_name = f"agentchattr-{current_name}"
             run_kwargs["session_name"] = unix_session_name
             _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
+            _runtime_session[0] = unix_session_name
+            _runtime_backend[0] = "tmux"
         return current_name
 
     while True:

@@ -1128,20 +1128,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cmd == "/stop":
                         target = cmd_parts[1].lstrip("@") if len(cmd_parts) > 1 else None
                         if target:
-                            import subprocess as _sp
-                            sessions = [f"agentchattr-{target}", f"agentchattr-{target}-2"]
-                            stopped = False
-                            for sess in sessions:
-                                try:
-                                    _sp.run(["tmux", "send-keys", "-t", sess, "Escape"], capture_output=True, timeout=3)
-                                    stopped = True
-                                    break
-                                except Exception:
-                                    pass
-                            if stopped:
-                                store.add("system", f"Interrupted {target}.", msg_type="system", channel=channel)
-                            else:
-                                store.add("system", f"Could not find session for {target}.", msg_type="system", channel=channel)
+                            ok, message, resolved = _interrupt_agent(target)
+                            store.add("system", message, msg_type="system", channel=channel)
+                            if ok and resolved:
+                                import mcp_bridge
+                                mcp_bridge.set_active(resolved, False)
+                                await broadcast_status()
                         else:
                             store.add("system", "Usage: /stop @agent-name", msg_type="system", channel=channel)
                         continue
@@ -2104,6 +2096,74 @@ async def set_agent_role(agent_name: str, request: Request):
     return JSONResponse({"ok": True, "role": role})
 
 
+# --- Interrupt API ---
+
+def _interrupt_exact_instance(agent_name: str) -> tuple[bool, str]:
+    import subprocess as _sp
+    import sys
+    if sys.platform == "win32":
+        return False, "Interrupt is not supported on Windows."
+    sessions = []
+    if registry:
+        inst = registry.get_instance(agent_name)
+        if inst and inst.get("runtime_session") and inst.get("runtime_backend", "tmux") == "tmux":
+            sessions.append(inst["runtime_session"])
+    sessions.append(f"agentchattr-{agent_name}")
+    sessions = list(dict.fromkeys(s for s in sessions if s))
+    for sess in sessions:
+        try:
+            result = _sp.run(
+                ["tmux", "send-keys", "-t", sess, "Escape"],
+                capture_output=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return True, f"Interrupted {agent_name}."
+        except Exception:
+            pass
+    return False, f"Could not find session for {agent_name}."
+
+
+def _resolve_interrupt_targets(agent_name: str) -> tuple[list[str], str | None]:
+    if not registry:
+        return [agent_name], None
+    targets = registry.resolve_to_instances(agent_name)
+    if len(targets) > 1:
+        return [], (
+            f"Multiple agents match {agent_name}: {', '.join(targets)}. "
+            "Use a specific name."
+        )
+    return targets, None
+
+
+def _interrupt_agent(agent_name: str) -> tuple[bool, str, str | None]:
+    targets, error = _resolve_interrupt_targets(agent_name)
+    if error:
+        return False, error, None
+    if not targets:
+        return False, f"No agent found for {agent_name}.", None
+    target = targets[0]
+    ok, message = _interrupt_exact_instance(target)
+    return ok, message, target if ok else None
+
+
+@app.post("/api/stop/{agent_name}")
+async def stop_agent(agent_name: str, request: Request):
+    channel = "general"
+    try:
+        body = await request.json()
+        channel = body.get("channel", "general") or "general"
+    except Exception:
+        pass
+    ok, message, resolved = _interrupt_agent(agent_name)
+    store.add("system", message, msg_type="system", channel=channel)
+    if ok and resolved:
+        import mcp_bridge
+        mcp_bridge.set_active(resolved, False)
+        await broadcast_status()
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": message}, status_code=404)
+
+
 # --- Skills API ---
 
 @app.get("/api/skills")
@@ -2311,6 +2371,12 @@ async def heartbeat(agent_name: str, request: Request):
             was_active = mcp_bridge._activity.get(current_name, False)
             mcp_bridge.set_active(current_name, active_val)
             _activity_changed = was_active != active_val
+        if "runtime_session" in body and registry:
+            registry.set_runtime_session(
+                current_name,
+                body["runtime_session"],
+                body.get("runtime_backend", "tmux"),
+            )
     except Exception:
         pass  # No body = plain heartbeat
     # Immediately broadcast on activity state change (don't wait for background checker)

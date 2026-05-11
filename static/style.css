@@ -265,6 +265,37 @@ header h1 {
     filter: grayscale(100%);
 }
 
+.pill-stop-btn {
+    background: none;
+    border: none;
+    margin-left: 4px;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 11px;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+    padding: 0 2px;
+    line-height: 1;
+}
+.pill-stop-btn:hover {
+    opacity: 1;
+    color: #ef4444;
+}
+
+.interrupt-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.interrupt-btn:hover {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+}
+
 .status-pill.pending {
     border-style: dashed;
     border-color: var(--agent-color, #888);

@@ -80,6 +80,8 @@ class Instance:
     epoch: int = 1
     state: str = "pending"   # "pending" | "active"
     registered_at: float = field(default_factory=time.time)
+    runtime_session: str = ""
+    runtime_backend: str = ""
 
 
 class RuntimeRegistry:
@@ -112,6 +114,15 @@ class RuntimeRegistry:
         with self._lock:
             for name, cfg in base_items.items():
                 self._bases[name] = cfg
+
+    def set_runtime_session(self, name: str, runtime_session: str, runtime_backend: str = "tmux") -> bool:
+        with self._lock:
+            inst = self._instances.get(name)
+            if not inst:
+                return False
+            inst.runtime_session = runtime_session
+            inst.runtime_backend = runtime_backend
+            return True
 
     def refresh_skills(self):
         """Re-scan all base agents' skills from filesystem."""
@@ -653,6 +664,8 @@ def _inst_dict(inst: Instance, include_token: bool = False) -> dict:
         "label": inst.label, "color": inst.color, "state": inst.state,
         "epoch": inst.epoch,
         "registered_at": inst.registered_at,
+        "runtime_session": inst.runtime_session,
+        "runtime_backend": inst.runtime_backend,
     }
     if include_token:
         d["token"] = inst.token

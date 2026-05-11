@@ -109,6 +109,54 @@ function selectSkill(skill) {
     skillMenuVisible = false;
 }
 
+async function interruptAgent(name) {
+    try {
+        await fetch(`/api/stop/${encodeURIComponent(name)}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-Token': SESSION_TOKEN,
+            },
+            body: JSON.stringify({ channel: activeChannel }),
+        });
+    } catch (e) {
+        console.error('Failed to interrupt agent:', e);
+    }
+}
+
+function findLatestMessageFromAgent(name) {
+    const messages = Array.from(document.querySelectorAll('.message[data-id]'));
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const el = messages[i];
+        if (el.classList.contains('system-msg') || el.classList.contains('join-msg') || el.classList.contains('summary-msg')) continue;
+        if ((el.dataset.channel || 'general') !== activeChannel) continue;
+        const sender = el.querySelector('.msg-sender')?.textContent?.trim();
+        if (sender === name) return el;
+    }
+    return null;
+}
+
+function syncInterruptButtons() {
+    document.querySelectorAll('.interrupt-btn').forEach(btn => btn.remove());
+    for (const [name, info] of Object.entries(latestStatus || {})) {
+        if (name === 'paused') continue;
+        if (!info.available || !info.busy) continue;
+        const latestMsg = findLatestMessageFromAgent(name);
+        if (!latestMsg) continue;
+        const actions = latestMsg.querySelector('.msg-actions');
+        if (!actions) continue;
+        const btn = document.createElement('button');
+        btn.className = 'interrupt-btn';
+        btn.textContent = '✕';
+        btn.title = `Interrupt ${name}`;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            interruptAgent(name);
+        });
+        actions.prepend(btn);
+    }
+}
+
 async function refreshSkills() {
     try {
         await fetch('/api/skills/refresh', {
@@ -951,6 +999,8 @@ function appendMessage(msg) {
 
     if (msgChannel !== activeChannel) return;  // don't scroll for hidden messages
 
+    syncInterruptButtons();
+
     if (autoScroll) {
         scrollToBottom();
     } else {
@@ -1308,6 +1358,17 @@ function _buildPill(container, name, cfg, status) {
                 base: cfg.base || '', mode,
             });
         });
+    }
+    if (isBusy && isAvailable) {
+        const stopBtn = document.createElement('button');
+        stopBtn.className = 'pill-stop-btn';
+        stopBtn.textContent = '✕';
+        stopBtn.title = `Interrupt ${label}`;
+        stopBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            interruptAgent(name);
+        });
+        pill.appendChild(stopBtn);
     }
     container.appendChild(pill);
 }
@@ -1868,6 +1929,7 @@ function updateStatus(data) {
         }
     }
     buildStatusPills();
+    syncInterruptButtons();
 }
 
 function updateTyping(agent, active) {
