@@ -34,12 +34,20 @@ def discover_skills(provider: str) -> list[str]:
     plugin_dir = paths.get("plugin_dir")
     if plugin_dir and plugin_dir.exists():
         try:
+            # Plugin skills: {publisher}/{plugin}/{version}/skills/{name}/SKILL.md
             for skill_file in plugin_dir.rglob("skills/*/SKILL.md"):
                 parts = skill_file.relative_to(plugin_dir).parts
                 if len(parts) >= 6:
                     plugin = parts[1]
                     skill_name = parts[4]
                     skills.append(f"{plugin}:{skill_name}")
+            # Plugin commands: {publisher}/{plugin}/{version}/commands/{name}.md
+            for cmd_file in plugin_dir.rglob("commands/*.md"):
+                parts = cmd_file.relative_to(plugin_dir).parts
+                if len(parts) >= 4:
+                    plugin = parts[1]
+                    cmd_name = cmd_file.stem
+                    skills.append(f"{plugin}:{cmd_name}")
         except OSError:
             pass
     user_dir = paths.get("user_dir")
