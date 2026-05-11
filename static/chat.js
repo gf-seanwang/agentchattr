@@ -124,36 +124,54 @@ async function interruptAgent(name) {
     }
 }
 
-function findLatestMessageFromAgent(name) {
-    const cfg = agentConfig[name];
-    const matchNames = new Set([name]);
-    if (cfg) {
-        if (cfg.label) matchNames.add(cfg.label);
-        if (cfg.base) matchNames.add(cfg.base);
-    }
+function findLatestInterruptMessage(name) {
+    const expected = canonicalAgentName(name);
     const messages = Array.from(document.querySelectorAll('.message[data-id]'));
     for (let i = messages.length - 1; i >= 0; i--) {
         const el = messages[i];
         if (el.classList.contains('system-msg') || el.classList.contains('join-msg') || el.classList.contains('summary-msg')) continue;
         if ((el.dataset.channel || 'general') !== activeChannel) continue;
         const sender = el.querySelector('.msg-sender')?.textContent?.trim();
-        if (matchNames.has(sender)) return el;
+        if (sender && canonicalAgentName(sender) === expected) return el;
+        const text = el.dataset.rawText || el.querySelector('.msg-text')?.textContent || '';
+        const mentions = text.match(/@(\w[\w-]*)/g) || [];
+        if (mentions.some(m => canonicalAgentName(m.slice(1)) === expected)) return el;
     }
     return null;
 }
 
+function canonicalAgentName(value) {
+    const raw = (value || '').trim().toLowerCase();
+    if (!raw) return '';
+    if (agentConfig[raw]) return raw;
+    for (const [name, cfg] of Object.entries(agentConfig || {})) {
+        const candidates = [name, cfg?.label, cfg?.base]
+            .filter(Boolean)
+            .map(v => String(v).trim().toLowerCase());
+        if (candidates.includes(raw)) return name;
+    }
+    return resolveAgent(raw) || raw;
+}
+
+let _busyGrace = {};
 function syncInterruptButtons() {
     document.querySelectorAll('.interrupt-btn').forEach(btn => btn.remove());
+    const now = Date.now();
     for (const [name, info] of Object.entries(latestStatus || {})) {
         if (name === 'paused') continue;
-        if (!info.available || !info.busy) continue;
-        const latestMsg = findLatestMessageFromAgent(name);
+        if (info.available && info.busy) {
+            _busyGrace[name] = now;
+        }
+        const lastBusy = _busyGrace[name] || 0;
+        const isRecentlyBusy = info.available && (info.busy || (now - lastBusy < 8000));
+        if (!isRecentlyBusy) continue;
+        const latestMsg = findLatestInterruptMessage(name);
         if (!latestMsg) continue;
         const actions = latestMsg.querySelector('.msg-actions');
         if (!actions) continue;
         const btn = document.createElement('button');
         btn.className = 'interrupt-btn';
-        btn.textContent = '✕';
+        btn.textContent = '✕ stop';
         btn.title = `Interrupt ${name}`;
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1365,7 +1383,9 @@ function _buildPill(container, name, cfg, status) {
             });
         });
     }
-    if (isBusy && isAvailable) {
+    const lastBusy = _busyGrace[name] || 0;
+    const showStop = isAvailable && (isBusy || (Date.now() - lastBusy < 8000));
+    if (showStop) {
         const stopBtn = document.createElement('button');
         stopBtn.className = 'pill-stop-btn';
         stopBtn.textContent = '✕';
