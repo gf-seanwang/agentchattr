@@ -81,7 +81,8 @@ function updateSkillMenu() {
     matches.forEach((skill, i) => {
         const row = document.createElement('div');
         row.className = 'slash-item' + (i === skillMenuIndex ? ' active' : '');
-        row.innerHTML = `<span class="slash-cmd">/${escapeHtml(skill)}</span>`;
+        const cliBadge = isCliCommand(skill) ? '<span class="skill-cli-badge">CLI</span>' : '';
+        row.innerHTML = `<span class="slash-cmd">/${escapeHtml(skill)}</span>${cliBadge}`;
         row.addEventListener('mousedown', (e) => {
             e.preventDefault();
             selectSkill(skill);
@@ -107,6 +108,29 @@ function selectSkill(skill) {
     input.focus();
     document.getElementById('skill-menu').classList.add('hidden');
     skillMenuVisible = false;
+}
+
+const CLI_COMMANDS = new Set(['/compact', '/diff', '/usage']);
+
+function isCliCommand(cmd) {
+    return CLI_COMMANDS.has(cmd.startsWith('/') ? cmd : '/' + cmd);
+}
+
+async function injectCommand(agentName, command) {
+    try {
+        const resp = await fetch(`/api/inject/${encodeURIComponent(agentName)}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-Token': SESSION_TOKEN,
+            },
+            body: JSON.stringify({ command, channel: activeChannel }),
+        });
+        return resp.ok;
+    } catch (e) {
+        console.error('Failed to inject command:', e);
+        return false;
+    }
 }
 
 async function interruptAgent(name) {
@@ -2678,6 +2702,30 @@ function sendMessage() {
         if (missing.length > 0) {
             text = missing.map(n => `@${n}`).join(' ') + ' ' + text;
         }
+    }
+
+    // Intercept CLI commands: @agent /cli-command → try inject to terminal, fallback to chat
+    const cliMatch = text.match(/^@([\w-]+)\s+(\/[\w-]+)\s*$/);
+    if (cliMatch && isCliCommand(cliMatch[2])) {
+        const rawText = input.value.trim();
+        input.value = '';
+        input.style.height = 'auto';
+        clearAttachments();
+        cancelReply();
+        updateSendButton();
+        input.focus();
+        injectCommand(cliMatch[1], cliMatch[2]).then(ok => {
+            if (!ok) {
+                // Fallback: send as chat message
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'message', text, sender: username, channel: activeChannel,
+                    }));
+                }
+            }
+            recordInputHistory(rawText, activeChannel);
+        });
+        return;
     }
 
     const payload = {

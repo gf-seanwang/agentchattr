@@ -2098,29 +2098,73 @@ async def set_agent_role(agent_name: str, request: Request):
 
 # --- Interrupt API ---
 
-def _interrupt_exact_instance(agent_name: str) -> tuple[bool, str]:
-    import subprocess as _sp
-    import sys
-    if sys.platform == "win32":
-        return False, "Interrupt is not supported on Windows."
+def _tmux_sessions_for_agent(agent_name: str) -> list[str]:
     sessions = []
     if registry:
         inst = registry.get_instance(agent_name)
         if inst and inst.get("runtime_session") and inst.get("runtime_backend", "tmux") == "tmux":
             sessions.append(inst["runtime_session"])
     sessions.append(f"agentchattr-{agent_name}")
-    sessions = list(dict.fromkeys(s for s in sessions if s))
-    for sess in sessions:
+    return list(dict.fromkeys(s for s in sessions if s))
+
+
+def _tmux_send(sess: str, text: str, literal: bool = False, enter: bool = False) -> tuple[bool, str]:
+    import subprocess as _sp
+    args = ["tmux", "send-keys", "-t", sess]
+    if literal:
+        args.append("-l")
+    args.append(text)
+    try:
+        result = _sp.run(args, capture_output=True, timeout=3, text=True)
+        if result.returncode != 0:
+            return False, result.stderr.strip() or "tmux send-keys failed"
+    except Exception as exc:
+        return False, str(exc)
+    if enter:
         try:
-            result = _sp.run(
-                ["tmux", "send-keys", "-t", sess, "Escape"],
-                capture_output=True, timeout=3,
-            )
-            if result.returncode == 0:
-                return True, f"Interrupted {agent_name}."
-        except Exception:
-            pass
+            r2 = _sp.run(["tmux", "send-keys", "-t", sess, "Enter"], capture_output=True, timeout=3, text=True)
+            if r2.returncode != 0:
+                return False, r2.stderr.strip() or "tmux Enter failed"
+        except Exception as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def _interrupt_exact_instance(agent_name: str) -> tuple[bool, str]:
+    import sys
+    if sys.platform == "win32":
+        return False, "Interrupt is not supported on Windows."
+    for sess in _tmux_sessions_for_agent(agent_name):
+        ok, _ = _tmux_send(sess, "Escape")
+        if ok:
+            return True, f"Interrupted {agent_name}."
     return False, f"Could not find session for {agent_name}."
+
+
+_CLI_COMMANDS_BY_PROVIDER = {
+    "claude": {"/compact", "/diff", "/usage"},
+    "codex": set(),
+}
+
+
+def _validate_cli_inject(agent_name: str, command: str) -> tuple[bool, str]:
+    if not command.startswith("/"):
+        return False, "Command must start with /"
+    if any(c in command for c in "\n\r\t"):
+        return False, "Command contains invalid characters"
+    if " " in command:
+        return False, "Arguments are not supported"
+    provider = ""
+    if registry:
+        inst = registry.get_instance(agent_name)
+        if inst:
+            base_cfg = registry.get_base_config(inst.get("base", ""))
+            if base_cfg:
+                provider = Path(base_cfg.get("command", "")).name or inst.get("base", "")
+    allowed = _CLI_COMMANDS_BY_PROVIDER.get(provider, set())
+    if command not in allowed:
+        return False, f"Command {command} is not allowed for {provider or agent_name}"
+    return True, ""
 
 
 def _resolve_interrupt_targets(agent_name: str) -> tuple[list[str], str | None]:
@@ -2162,6 +2206,44 @@ async def stop_agent(agent_name: str, request: Request):
         await broadcast_status()
         return JSONResponse({"ok": True})
     return JSONResponse({"error": message}, status_code=404)
+
+
+@app.post("/api/inject/{agent_name}")
+async def inject_command(agent_name: str, request: Request):
+    channel = "general"
+    command = ""
+    try:
+        body = await request.json()
+        command = body.get("command", "")
+        channel = body.get("channel", "general") or "general"
+    except Exception:
+        pass
+    if not command:
+        return JSONResponse({"error": "No command"}, status_code=400)
+    targets, error = _resolve_interrupt_targets(agent_name)
+    if error:
+        store.add("system", error, msg_type="system", channel=channel)
+        return JSONResponse({"error": error}, status_code=404)
+    if not targets:
+        msg = f"No agent found for {agent_name}."
+        store.add("system", msg, msg_type="system", channel=channel)
+        return JSONResponse({"error": msg}, status_code=404)
+    target = targets[0]
+    ok, err = _validate_cli_inject(target, command)
+    if not ok:
+        store.add("system", err, msg_type="system", channel=channel)
+        return JSONResponse({"error": err}, status_code=403)
+    import sys as _sys
+    if _sys.platform == "win32":
+        return JSONResponse({"error": "CLI inject is not supported on Windows."}, status_code=501)
+    for sess in _tmux_sessions_for_agent(target):
+        ok, err = _tmux_send(sess, command, literal=True, enter=True)
+        if ok:
+            store.add("system", f"Sent {command} to {target}.", msg_type="system", channel=channel)
+            return JSONResponse({"ok": True, "target": target, "command": command})
+    msg = f"Could not send {command} to {target}: tmux session not found."
+    store.add("system", msg, msg_type="system", channel=channel)
+    return JSONResponse({"error": msg}, status_code=404)
 
 
 # --- Skills API ---
