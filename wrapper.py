@@ -763,6 +763,7 @@ def main():
     _restart_reason = [None]
     _heartbeat_fail_count = [0]
     _HEARTBEAT_FAIL_THRESHOLD = 3
+    _reconnecting = [False]
     _runtime_session = [""]
     _runtime_backend = [""]
 
@@ -797,6 +798,9 @@ def main():
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     _heartbeat_fail_count[0] = 0
+                    if _reconnecting[0]:
+                        time.sleep(5)
+                        continue
                     try:
                         replacement = _register_instance(server_port, agent, args.label)
                         if set_runtime_identity(replacement["name"], replacement["token"]) and not needs_proxy:
@@ -813,6 +817,7 @@ def main():
             if (
                 _heartbeat_fail_count[0] >= _HEARTBEAT_FAIL_THRESHOLD
                 and not _agent_restart_event.is_set()
+                and not _reconnecting[0]
             ):
                 print("\n  Server lost. Triggering agent restart...")
                 _request_restart("server_lost")
@@ -1000,28 +1005,30 @@ def main():
                     print("\n  Server disconnected. --no-restart set, exiting.")
                     stop_wrapper()
                     break
-                print("\n  Server disconnected. Waiting for server to come back...")
-                wait = 3
-                while True:
-                    try:
-                        re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
-                        set_runtime_identity(re_reg["name"], re_reg["token"])
-                        print(f"  Reconnected as: {re_reg['name']}")
-                        break
-                    except SystemExit:
-                        pass
-                    time.sleep(wait)
-                    wait = min(wait * 2, 30)
+                _reconnecting[0] = True
+                try:
+                    print("\n  Server disconnected. Waiting for server to come back...")
+                    wait = 3
+                    while True:
+                        try:
+                            re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
+                            set_runtime_identity(re_reg["name"], re_reg["token"])
+                            print(f"  Reconnected as: {re_reg['name']}")
+                            break
+                        except SystemExit:
+                            pass
+                        time.sleep(wait)
+                        wait = min(wait * 2, 30)
 
-            # Clear any stale restart events set by heartbeat during reconnect wait
-            _agent_restart_event.clear()
-            _restart_reason[0] = None
-            _heartbeat_fail_count[0] = 0
-
-            current_name = rebuild_launch_for_current_identity()
-            if reason == "server_lost":
+                    _agent_restart_event.clear()
+                    _restart_reason[0] = None
+                    _heartbeat_fail_count[0] = 0
+                    current_name = rebuild_launch_for_current_identity()
+                finally:
+                    _reconnecting[0] = False
                 print(f"  Restarting agent session after server reconnect for @{current_name}...")
             else:
+                current_name = rebuild_launch_for_current_identity()
                 print(f"  Restarting agent session with refreshed credentials for @{current_name}...")
             continue
 
@@ -1044,24 +1051,28 @@ def main():
                 print("\n  Server disconnected. --no-restart set, exiting.")
                 stop_wrapper()
                 break
-            print("\n  Server disconnected. Waiting for server to come back...")
-            if _watcher_stop is not None:
-                _watcher_stop.set()
-            wait = 3
-            while True:
-                try:
-                    re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
-                    set_runtime_identity(re_reg["name"], re_reg["token"])
-                    print(f"  Reconnected as: {re_reg['name']}")
-                    break
-                except SystemExit:
-                    pass
-                time.sleep(wait)
-                wait = min(wait * 2, 30)
-            _agent_restart_event.clear()
-            _restart_reason[0] = None
-            _heartbeat_fail_count[0] = 0
-            rebuild_launch_for_current_identity()
+            _reconnecting[0] = True
+            try:
+                print("\n  Server disconnected. Waiting for server to come back...")
+                if _watcher_stop is not None:
+                    _watcher_stop.set()
+                wait = 3
+                while True:
+                    try:
+                        re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
+                        set_runtime_identity(re_reg["name"], re_reg["token"])
+                        print(f"  Reconnected as: {re_reg['name']}")
+                        break
+                    except SystemExit:
+                        pass
+                    time.sleep(wait)
+                    wait = min(wait * 2, 30)
+                _agent_restart_event.clear()
+                _restart_reason[0] = None
+                _heartbeat_fail_count[0] = 0
+                rebuild_launch_for_current_identity()
+            finally:
+                _reconnecting[0] = False
             continue
 
         # Server is alive but agent exited normally — clean shutdown
