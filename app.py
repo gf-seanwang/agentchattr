@@ -2309,7 +2309,13 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         venv_python = root / "venv" / "bin" / "python"
         python = str(venv_python) if venv_python.exists() else _sys.executable
 
-        cmd = [python, "wrapper.py", agent_name, "--no-restart"]
+        import re as _re_mod
+        import uuid as _uuid
+        safe_name = _re_mod.sub(r"[^a-zA-Z0-9_.-]", "_", agent_name)[:60]
+        managed_id = _uuid.uuid4().hex[:8]
+        tmux_session = f"agentchattr-managed-{safe_name}-{managed_id}"
+
+        cmd = [python, "wrapper.py", agent_name, "--no-restart", "--tmux-session", tmux_session]
         srv = config.get("server", {})
         mcp_cfg = config.get("mcp", {})
         img = config.get("images", {})
@@ -2318,10 +2324,7 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         cmd.extend(["--mcp-http-port", str(mcp_cfg.get("http_port", 8200))])
         cmd.extend(["--mcp-sse-port", str(mcp_cfg.get("sse_port", 8201))])
         cmd.extend(["--upload-dir", str(img.get("upload_dir", "./uploads"))])
-
-        import re as _re_mod
-        safe_name = _re_mod.sub(r"[^a-zA-Z0-9_.-]", "_", agent_name)
-        log_path = _wrapper_log_dir() / f"{safe_name}.log"
+        log_path = _wrapper_log_dir() / f"{safe_name}-{managed_id}.log"
         try:
             log_file = open(log_path, "a", buffering=1)
             try:
@@ -2341,6 +2344,8 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
                 "pid": proc.pid,
                 "agent": agent_name,
                 "channel": channel,
+                "managed_id": managed_id,
+                "tmux_session": tmux_session,
                 "log_path": str(log_path),
                 "log_file": log_file,
                 "started_at": __import__("time").time(),
@@ -2357,7 +2362,8 @@ def _stop_managed_wrapper(agent_name: str) -> tuple[str, str]:
         if not entry:
             return "skipped", "manual_or_unknown"
 
-        sessions = _tmux_sessions_for_agent(agent_name)
+        owned_session = entry.get("tmux_session")
+        sessions = [owned_session] if owned_session else []
 
         try:
             proc = entry["proc"]
@@ -2372,10 +2378,9 @@ def _stop_managed_wrapper(agent_name: str) -> tuple[str, str]:
             for sess in sessions:
                 _sp.run(["tmux", "kill-session", "-t", sess], capture_output=True)
 
-            if not _wait_tmux_sessions_gone(sessions, timeout=3):
+            if sessions and not _wait_tmux_sessions_gone(sessions, timeout=3):
                 entry["state"] = "cleanup_failed"
                 entry["cleanup_error"] = "tmux session still exists after kill"
-                entry["sessions"] = sessions
                 return "error", entry["cleanup_error"]
 
             log_file = entry.get("log_file")

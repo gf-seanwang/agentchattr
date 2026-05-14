@@ -583,7 +583,14 @@ def main():
     parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
     parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
     parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
+    parser.add_argument("--tmux-session", default=None, help="Override tmux session name (used by managed launch)")
     args, extra = parser.parse_known_args()
+
+    if args.tmux_session:
+        import re as _re_validate
+        if not _re_validate.match(r'^[A-Za-z0-9_.-]{1,100}$', args.tmux_session):
+            print("  Error: invalid --tmux-session name.")
+            sys.exit(1)
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
@@ -928,7 +935,7 @@ def main():
     else:
         from wrapper_unix import get_activity_checker, run_agent
 
-        unix_session_name = f"agentchattr-{assigned_name}"
+        unix_session_name = args.tmux_session or f"agentchattr-{assigned_name}"
         _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
         _runtime_session[0] = unix_session_name
         _runtime_backend[0] = "tmux"
@@ -972,7 +979,8 @@ def main():
         if sys.platform == "win32":
             _set_activity_checker(get_activity_checker(_agent_pid, agent_name=current_name, trigger_flag=_trigger_flag))
         else:
-            unix_session_name = f"agentchattr-{current_name}"
+            if not args.tmux_session:
+                unix_session_name = f"agentchattr-{current_name}"
             run_kwargs["session_name"] = unix_session_name
             _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
             _runtime_session[0] = unix_session_name
