@@ -2383,6 +2383,32 @@ def _stop_managed_wrapper(agent_name: str) -> tuple[str, str]:
                 entry["cleanup_error"] = "tmux session still exists after kill"
                 return "error", entry["cleanup_error"]
 
+            # Deregister owned instance by matching runtime_session
+            owned_session = entry.get("tmux_session")
+            if owned_session and registry:
+                import mcp_bridge
+                target_inst = None
+                for inst in registry.get_instances_for(agent_name):
+                    if inst.get("runtime_session") == owned_session:
+                        target_inst = inst
+                        break
+                if target_inst:
+                    inst_name = target_inst["name"]
+                    dereg_result = registry.deregister(inst_name)
+                    if dereg_result and dereg_result.get("_renamed_back"):
+                        renamed = dereg_result["_renamed_back"]
+                        mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+                        store.rename_sender(renamed["old"], renamed["new"])
+                        if _event_loop:
+                            import asyncio
+                            rename_event = json.dumps({"type": "agent_renamed", "old_name": renamed["old"], "new_name": renamed["new"]})
+                            asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
+                    renamed_new = dereg_result.get("_renamed_back", {}).get("new") if dereg_result else None
+                    if inst_name != renamed_new:
+                        mcp_bridge.purge_identity(inst_name)
+                    if hasattr(registry, 'clean_renames_for'):
+                        registry.clean_renames_for(inst_name)
+
             log_file = entry.get("log_file")
             if log_file:
                 try:
