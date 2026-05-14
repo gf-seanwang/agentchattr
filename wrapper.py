@@ -979,6 +979,9 @@ def main():
             _runtime_backend[0] = "tmux"
         return current_name
 
+    import signal
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
     while True:
         try:
             run_agent(**run_kwargs)
