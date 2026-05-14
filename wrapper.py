@@ -1012,10 +1012,6 @@ def main():
                 _watcher_stop.set()
 
             if reason == "server_lost":
-                if args.no_restart:
-                    print("\n  Server disconnected. --no-restart set, exiting.")
-                    stop_wrapper()
-                    break
                 _reconnecting[0] = True
                 try:
                     print("\n  Server disconnected. Waiting for server to come back...")
