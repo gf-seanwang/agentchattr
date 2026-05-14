@@ -133,12 +133,14 @@ def run_agent(
 
     while True:
         monitor_stop = threading.Event()
+        monitor_killed = threading.Event()
 
         def monitor_restart():
             if restart_event is None:
                 return
             while not monitor_stop.is_set():
                 if restart_event.wait(0.5):
+                    monitor_killed.set()
                     subprocess.run(
                         ["tmux", "kill-session", "-t", session_name],
                         capture_output=True,
@@ -166,9 +168,17 @@ def run_agent(
                 threading.Thread(target=monitor_restart, daemon=True).start()
 
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
-            subprocess.run(["tmux", "attach-session", "-t", session_name])
+            try:
+                subprocess.run(["tmux", "attach-session", "-t", session_name])
+            except OSError:
+                if not monitor_killed.is_set() and not (
+                    restart_event is not None and restart_event.is_set()
+                ):
+                    raise
 
-            if restart_event is not None and restart_event.is_set():
+            if monitor_killed.is_set() or (
+                restart_event is not None and restart_event.is_set()
+            ):
                 break
 
             # Check: did the agent exit, or did the user just detach?
@@ -179,6 +189,7 @@ def run_agent(
                 print(f"  Reattach: tmux attach -t {session_name}")
                 while _session_exists(session_name):
                     if restart_event is not None and restart_event.is_set():
+                        monitor_killed.set()
                         subprocess.run(
                             ["tmux", "kill-session", "-t", session_name],
                             capture_output=True,
