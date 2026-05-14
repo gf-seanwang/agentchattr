@@ -2326,12 +2326,16 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         cmd.extend(["--mcp-sse-port", str(mcp_cfg.get("sse_port", 8201))])
         cmd.extend(["--upload-dir", str(img.get("upload_dir", "./uploads"))])
 
-        # Claude agents: add --dangerously-skip-permissions
+        # Auto skip permissions for managed wrappers
         base_cfg = bases.get(agent_name, {})
         agent_command = base_cfg.get("command", "")
-        is_claude = Path(agent_command).name == "claude" or agent_command == "claude"
+        cmd_name = Path(agent_command).name or agent_command
+        is_claude = cmd_name == "claude"
+        is_codex = cmd_name == "codex"
         if is_claude:
             cmd.append("--dangerously-skip-permissions")
+        elif is_codex:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
         log_path = _wrapper_log_dir() / f"{safe_name}-{managed_id}.log"
         try:
             log_file = open(log_path, "a", buffering=1)
