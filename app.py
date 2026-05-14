@@ -2316,6 +2316,7 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         tmux_session = f"agentchattr-managed-{safe_name}-{managed_id}"
 
         cmd = [python, "wrapper.py", agent_name, "--no-restart", "--tmux-session", tmux_session]
+
         srv = config.get("server", {})
         mcp_cfg = config.get("mcp", {})
         img = config.get("images", {})
@@ -2324,6 +2325,13 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         cmd.extend(["--mcp-http-port", str(mcp_cfg.get("http_port", 8200))])
         cmd.extend(["--mcp-sse-port", str(mcp_cfg.get("sse_port", 8201))])
         cmd.extend(["--upload-dir", str(img.get("upload_dir", "./uploads"))])
+
+        # Claude agents: add --dangerously-skip-permissions
+        base_cfg = bases.get(agent_name, {})
+        agent_command = base_cfg.get("command", "")
+        is_claude = Path(agent_command).name == "claude" or agent_command == "claude"
+        if is_claude:
+            cmd.append("--dangerously-skip-permissions")
         log_path = _wrapper_log_dir() / f"{safe_name}-{managed_id}.log"
         try:
             log_file = open(log_path, "a", buffering=1)
@@ -2350,6 +2358,17 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
                 "log_file": log_file,
                 "started_at": __import__("time").time(),
             }
+
+            # Auto-accept skip-permissions confirmation for Claude
+            if Path(agent_command).name == "claude" or agent_command == "claude":
+                def _auto_accept(sess):
+                    import time as _t
+                    _t.sleep(10)
+                    _sp.run(["tmux", "send-keys", "-t", sess, "Down"], capture_output=True)
+                    _t.sleep(0.5)
+                    _sp.run(["tmux", "send-keys", "-t", sess, "Enter"], capture_output=True)
+                threading.Thread(target=_auto_accept, args=(tmux_session,), daemon=True).start()
+
             return "started", f"PID {proc.pid}"
         except Exception as exc:
             return "error", str(exc)
