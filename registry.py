@@ -115,6 +115,35 @@ class RuntimeRegistry:
             for name, cfg in base_items.items():
                 self._bases[name] = cfg
 
+    def reseed(self, agents_config: dict) -> dict:
+        """Re-read config and add/update base agents without affecting instances."""
+        base_items = {}
+        for name, cfg in agents_config.items():
+            base_items[name] = dict(cfg)
+        for name, cfg in base_items.items():
+            provider = _resolve_provider(cfg, name)
+            discovered = discover_skills(provider)
+            cfg["_config_skills"] = list(cfg.get("skills", []))
+            cfg["_discovered_skills"] = discovered
+            cfg["skills"] = _merge_skills(discovered, cfg["_config_skills"])
+        added = []
+        updated = []
+        unchanged = []
+        with self._lock:
+            existing_names = set(self._bases.keys())
+            for name, cfg in base_items.items():
+                if name not in existing_names:
+                    self._bases[name] = cfg
+                    added.append(name)
+                else:
+                    self._bases[name] = cfg
+                    updated.append(name)
+            ignored_removed = [n for n in existing_names if n not in base_items]
+            changed = bool(added or updated)
+        if changed:
+            self._notify()
+        return {"added": added, "updated": updated, "ignored_removed": ignored_removed, "changed": changed}
+
     def set_runtime_session(self, name: str, runtime_session: str, runtime_backend: str = "tmux") -> bool:
         with self._lock:
             inst = self._instances.get(name)

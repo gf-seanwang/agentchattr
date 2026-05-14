@@ -1010,6 +1010,25 @@ async def broadcast_agents():
     ws_clients.difference_update(dead)
 
 
+def _build_base_colors() -> dict:
+    agents_cfg = config.get("agents", {})
+    return {
+        name: {"color": cfg.get("color", "#888"), "label": cfg.get("label", name)}
+        for name, cfg in agents_cfg.items()
+    }
+
+
+async def broadcast_base_colors():
+    data = json.dumps({"type": "base_colors", "data": _build_base_colors()})
+    dead = set()
+    for client in list(ws_clients):
+        try:
+            await client.send_text(data)
+        except Exception:
+            dead.add(client)
+    ws_clients.difference_update(dead)
+
+
 def _on_registry_change():
     """Called from registry (any thread) when instances register/deregister/claim/rename."""
     # Update router with current agent names (base names + registered instances)
@@ -1049,10 +1068,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.send_text(json.dumps({"type": "agents", "data": agent_cfg}))
 
     # Send base agent colors (used for message coloring, no pills)
-    base_colors = {}
-    for name, cfg in config.get("agents", {}).items():
-        base_colors[name] = {"color": cfg.get("color", "#888"), "label": cfg.get("label", name)}
-    await websocket.send_text(json.dumps({"type": "base_colors", "data": base_colors}))
+    await websocket.send_text(json.dumps({"type": "base_colors", "data": _build_base_colors()}))
 
     # Send todos {msg_id: status}
     await websocket.send_text(json.dumps({"type": "todos", "data": store.get_todos()}))
@@ -2244,6 +2260,31 @@ async def inject_command(agent_name: str, request: Request):
     msg = f"Could not send {command} to {target}: tmux session not found."
     store.add("system", msg, msg_type="system", channel=channel)
     return JSONResponse({"error": msg}, status_code=404)
+
+
+# --- Config Reload API ---
+
+@app.post("/api/config/reload")
+async def reload_config_endpoint():
+    global config
+    try:
+        from config_loader import ROOT, load_config
+        new_cfg = load_config(ROOT)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    new_agents = new_cfg.get("agents", {})
+    if not isinstance(new_agents, dict):
+        return JSONResponse({"error": "[agents] must be a table"}, status_code=400)
+    if not registry:
+        return JSONResponse({"error": "registry not initialized"}, status_code=500)
+    try:
+        result = registry.reseed(new_agents)
+        config = {**config, "agents": new_agents}
+        await broadcast_agents()
+        await broadcast_base_colors()
+    except Exception as exc:
+        return JSONResponse({"error": f"Reload failed: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, **result})
 
 
 # --- Skills API ---
