@@ -176,6 +176,9 @@ def load_projects(root: Path | None = None) -> tuple[dict[str, dict], list[str]]
         valid_agents = {}
         agent_re = re.compile(r'^[a-z0-9][a-z0-9\-]{0,63}$')
         for name, cfg in agents.items():
+            if not isinstance(cfg, dict):
+                warnings.append(f"{toml_file.name}: agent '{name}' is not a table; skipped")
+                continue
             if not agent_re.match(name):
                 warnings.append(f"{toml_file.name}: invalid agent name '{name}'; skipped")
                 continue
