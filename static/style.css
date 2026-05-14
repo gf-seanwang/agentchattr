@@ -1395,7 +1395,7 @@ main#timeline {
     margin-left: 0;
 }
 .channel-tab.editing .channel-tab-actions {
-    max-width: 40px;
+    max-width: 120px;
     opacity: 1;
     margin-left: 4px;
 }
