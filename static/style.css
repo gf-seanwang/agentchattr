@@ -1439,6 +1439,8 @@ main#timeline {
 .channel-tab-actions button:hover { background: var(--white-08); }
 .channel-tab-actions .ch-edit-btn:hover { color: var(--text); }
 .channel-tab-actions .ch-delete-btn:hover { color: var(--error-color); }
+.channel-tab-actions .ch-start-btn:hover { color: var(--online, #4ade80); }
+.channel-tab-actions .ch-restart-btn:hover { color: var(--accent); }
 
 /* Add button — sits after tabs */
 .channel-add {

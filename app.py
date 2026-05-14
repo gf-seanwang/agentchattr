@@ -185,7 +185,7 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")) or path == "/api/skills":
+            if path == "/" or path.startswith(("/static/", "/uploads/")) or path in ("/api/roles", "/api/skills"):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -2260,6 +2260,303 @@ async def inject_command(agent_name: str, request: Request):
     msg = f"Could not send {command} to {target}: tmux session not found."
     store.add("system", msg, msg_type="system", channel=channel)
     return JSONResponse({"error": msg}, status_code=404)
+
+
+# --- Wrapper Management API ---
+
+_managed_wrappers: dict[str, dict] = {}
+_wrapper_lock = threading.Lock()
+
+
+def _wrapper_log_dir() -> Path:
+    d = Path(config.get("server", {}).get("data_dir", "./data")) / "wrapper_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _managed_wrapper_alive(agent_name: str) -> bool:
+    entry = _managed_wrappers.get(agent_name)
+    return entry is not None and entry["proc"].poll() is None
+
+
+def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tuple[str, str]:
+    import subprocess as _sp
+    import sys as _sys
+
+    if _sys.platform == "win32":
+        return "error", "Background wrapper launch not supported on Windows"
+
+    with _wrapper_lock:
+        entry = _managed_wrappers.get(agent_name)
+        if entry and entry.get("state") == "cleanup_failed":
+            return "error", entry.get("cleanup_error", "previous cleanup failed")
+        if _managed_wrapper_alive(agent_name):
+            return "skipped", "already_managed"
+
+        if not registry:
+            return "error", "Registry not initialized"
+        bases = registry.get_bases()
+        if agent_name not in bases:
+            return "error", f"Unknown agent: {agent_name}"
+
+        import mcp_bridge
+        instances = registry.get_instances_for(agent_name)
+        online = [i for i in instances if mcp_bridge.is_online(i["name"])]
+        if online:
+            return "skipped", "already_online"
+
+        root = Path(__file__).parent
+        venv_python = root / "venv" / "bin" / "python"
+        python = str(venv_python) if venv_python.exists() else _sys.executable
+
+        cmd = [python, "wrapper.py", agent_name, "--no-restart"]
+        srv = config.get("server", {})
+        mcp_cfg = config.get("mcp", {})
+        img = config.get("images", {})
+        cmd.extend(["--data-dir", str(srv.get("data_dir", "./data"))])
+        cmd.extend(["--port", str(srv.get("port", 8300))])
+        cmd.extend(["--mcp-http-port", str(mcp_cfg.get("http_port", 8200))])
+        cmd.extend(["--mcp-sse-port", str(mcp_cfg.get("sse_port", 8201))])
+        cmd.extend(["--upload-dir", str(img.get("upload_dir", "./uploads"))])
+
+        import re as _re_mod
+        safe_name = _re_mod.sub(r"[^a-zA-Z0-9_.-]", "_", agent_name)
+        log_path = _wrapper_log_dir() / f"{safe_name}.log"
+        try:
+            log_file = open(log_path, "a", buffering=1)
+            try:
+                proc = _sp.Popen(
+                    cmd,
+                    cwd=str(root),
+                    stdin=_sp.DEVNULL,
+                    stdout=log_file,
+                    stderr=_sp.STDOUT,
+                    start_new_session=True,
+                )
+            except Exception:
+                log_file.close()
+                raise
+            _managed_wrappers[agent_name] = {
+                "proc": proc,
+                "pid": proc.pid,
+                "agent": agent_name,
+                "channel": channel,
+                "log_path": str(log_path),
+                "log_file": log_file,
+                "started_at": __import__("time").time(),
+            }
+            return "started", f"PID {proc.pid}"
+        except Exception as exc:
+            return "error", str(exc)
+
+
+def _stop_managed_wrapper(agent_name: str) -> tuple[str, str]:
+    import subprocess as _sp
+    with _wrapper_lock:
+        entry = _managed_wrappers.get(agent_name)
+        if not entry:
+            return "skipped", "manual_or_unknown"
+
+        sessions = _tmux_sessions_for_agent(agent_name)
+
+        try:
+            proc = entry["proc"]
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+            for sess in sessions:
+                _sp.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+
+            if not _wait_tmux_sessions_gone(sessions, timeout=3):
+                entry["state"] = "cleanup_failed"
+                entry["cleanup_error"] = "tmux session still exists after kill"
+                entry["sessions"] = sessions
+                return "error", entry["cleanup_error"]
+
+            log_file = entry.get("log_file")
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+
+            _managed_wrappers.pop(agent_name, None)
+            return "stopped", ""
+        except Exception as exc:
+            entry["state"] = "cleanup_failed"
+            entry["cleanup_error"] = str(exc)
+            entry["sessions"] = sessions
+            return "error", str(exc)
+
+
+def _tmux_session_exists(sess: str) -> bool:
+    import subprocess as _sp
+    return _sp.run(["tmux", "has-session", "-t", sess], capture_output=True).returncode == 0
+
+
+def _wait_tmux_gone(agent_name: str, timeout: float = 5):
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if all(not _tmux_session_exists(s) for s in _tmux_sessions_for_agent(agent_name)):
+            return True
+        _time.sleep(0.2)
+    return False
+
+
+def _wait_tmux_sessions_gone(sessions: list[str], timeout: float = 5) -> bool:
+    import time as _time
+    sessions = list(dict.fromkeys(s for s in sessions if s))
+    if not sessions:
+        return True
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if all(not _tmux_session_exists(s) for s in sessions):
+            return True
+        _time.sleep(0.2)
+    return all(not _tmux_session_exists(s) for s in sessions)
+
+
+def _resolve_wrapper_agents(body: dict) -> tuple[list[str], list[dict]]:
+    errors = []
+    raw_agents = body.get("agents")
+    channel = body.get("channel", "")
+
+    if channel:
+        channels = room_settings.get("channels", ["general"])
+        if channel not in channels:
+            errors.append({"error": f"Unknown channel: {channel}"})
+            return [], errors
+
+    if raw_agents:
+        if not isinstance(raw_agents, list):
+            errors.append({"error": "agents must be a list"})
+            return [], errors
+        agents = raw_agents
+    elif channel:
+        agents = room_settings.get("channel_agents", {}).get(channel, [])
+    else:
+        errors.append({"error": "No agents or channel specified"})
+        return [], errors
+
+    bases = registry.get_bases() if registry else {}
+    result = []
+    seen = set()
+    for agent in agents:
+        if not isinstance(agent, str):
+            continue
+        if agent in seen:
+            continue
+        seen.add(agent)
+        if agent not in bases:
+            errors.append({"agent": agent, "error": "unknown base agent"})
+            continue
+        result.append(agent)
+
+    if not result and not errors:
+        errors.append({"error": "No valid agents found"})
+    return result, errors
+
+
+@app.post("/api/wrappers/start")
+async def start_wrappers(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid body"}, status_code=400)
+    agents, errors = _resolve_wrapper_agents(body)
+    if errors:
+        return JSONResponse({"error": errors[0]["error"]}, status_code=400)
+    channel = body.get("channel", "")
+    started = []
+    skipped = []
+    for agent_name in agents:
+        status, msg = _launch_managed_wrapper(agent_name, channel=channel)
+        if status == "started":
+            started.append({"agent": agent_name, "pid": msg})
+        elif status == "skipped":
+            skipped.append({"agent": agent_name, "reason": msg})
+        else:
+            errors.append({"agent": agent_name, "error": msg})
+    payload = {"started": started, "skipped": skipped, "errors": errors}
+    payload["ok"] = not errors
+    return JSONResponse(payload, status_code=207 if errors and started else 200 if not errors else 400)
+
+
+@app.post("/api/wrappers/stop")
+async def stop_wrappers(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid body"}, status_code=400)
+    agents, errors = _resolve_wrapper_agents(body)
+    if errors:
+        return JSONResponse({"error": errors[0]["error"]}, status_code=400)
+    stopped = []
+    skipped = []
+    for agent_name in agents:
+        status, msg = _stop_managed_wrapper(agent_name)
+        if status == "stopped":
+            stopped.append(agent_name)
+        elif status == "skipped":
+            skipped.append({"agent": agent_name, "reason": msg})
+        else:
+            errors.append({"agent": agent_name, "error": msg})
+    payload = {"stopped": stopped, "skipped": skipped, "errors": errors}
+    payload["ok"] = not errors
+    return JSONResponse(payload, status_code=207 if errors and stopped else 200 if not errors else 400)
+
+
+
+
+
+@app.post("/api/wrappers/restart")
+async def restart_wrappers(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid body"}, status_code=400)
+    agents, errors = _resolve_wrapper_agents(body)
+    if errors:
+        return JSONResponse({"error": errors[0]["error"]}, status_code=400)
+    channel = body.get("channel", "")
+    stopped = []
+    skipped_stop = []
+    failed_stop = set()
+    for agent_name in agents:
+        status, msg = _stop_managed_wrapper(agent_name)
+        if status == "stopped":
+            stopped.append(agent_name)
+        elif status == "error":
+            errors.append({"agent": agent_name, "error": msg})
+            failed_stop.add(agent_name)
+        else:
+            skipped_stop.append({"agent": agent_name, "reason": msg})
+    started = []
+    skipped_start = []
+    for agent_name in agents:
+        if agent_name in failed_stop:
+            continue
+        status, msg = _launch_managed_wrapper(agent_name, channel=channel)
+        if status == "started":
+            started.append({"agent": agent_name, "pid": msg})
+        elif status == "skipped":
+            skipped_start.append({"agent": agent_name, "reason": msg})
+        else:
+            errors.append({"agent": agent_name, "error": msg})
+    payload = {
+        "stopped": stopped,
+        "started": started,
+        "skipped": skipped_stop + skipped_start,
+        "errors": errors,
+    }
+    payload["ok"] = not errors
+    return JSONResponse(payload, status_code=207 if errors and started else 200 if not errors else 400)
 
 
 # --- Config Reload API ---

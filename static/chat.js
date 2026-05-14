@@ -205,6 +205,60 @@ function syncInterruptButtons() {
     }
 }
 
+async function reloadConfig() {
+    const btn = document.getElementById('config-reload-btn');
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch('/api/config/reload', {
+            method: 'POST',
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+            alert(data.error || 'Config reload failed');
+            return;
+        }
+        const warns = (data.warnings || []).length;
+        const added = (data.added || []).length;
+        const projects = (data.projects_loaded || []).length;
+        alert(`Config reloaded. ${added} added, ${projects} projects.${warns ? ` ${warns} warning(s).` : ''}`);
+    } catch (e) {
+        alert('Config reload failed');
+        console.error('Failed to reload config:', e);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function startChannelWrappers(channel) {
+    try {
+        const resp = await fetch('/api/wrappers/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
+            body: JSON.stringify({ channel }),
+        });
+        const data = await resp.json();
+        console.log('Wrappers started:', data);
+    } catch (e) {
+        console.error('Failed to start wrappers:', e);
+    }
+}
+
+async function restartChannelWrappers(channel) {
+    if (!confirm(`Restart wrappers for #${channel}?`)) return;
+    try {
+        const resp = await fetch('/api/wrappers/restart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
+            body: JSON.stringify({ channel }),
+        });
+        const data = await resp.json();
+        console.log('Wrappers restarted:', data);
+    } catch (e) {
+        console.error('Failed to restart wrappers:', e);
+    }
+}
+
 async function refreshSkills() {
     try {
         await fetch('/api/skills/refresh', {

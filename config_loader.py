@@ -137,6 +137,23 @@ def load_config(root: Path | None = None) -> dict:
     return config
 
 
+def load_config_with_projects(root: Path | None = None) -> dict:
+    """Load config.toml + config.local.toml + projects/*.toml.
+
+    Used by wrapper.py so project agents are accepted by argparse choices.
+    """
+    config = load_config(root)
+    projects, warnings = load_projects(root)
+    for w in warnings:
+        print(f"  Warning: {w}")
+    config_agents = config.setdefault("agents", {})
+    for _channel, project in projects.items():
+        for name, agent_cfg in project.get("agents", {}).items():
+            if name not in config_agents:
+                config_agents[name] = agent_cfg
+    return config
+
+
 def load_projects(root: Path | None = None) -> tuple[dict[str, dict], list[str]]:
     """Load project TOML files from projects/ directory.
 

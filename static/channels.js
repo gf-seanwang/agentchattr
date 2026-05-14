@@ -68,6 +68,20 @@ function renderChannelTabs() {
             editBtn.onclick = (e) => { e.stopPropagation(); showChannelRenameDialog(name); };
             actions.appendChild(editBtn);
 
+            const startBtn = document.createElement('button');
+            startBtn.className = 'ch-start-btn';
+            startBtn.title = 'Start wrappers';
+            startBtn.innerHTML = '▶';
+            startBtn.onclick = (e) => { e.stopPropagation(); startChannelWrappers(name); };
+            actions.appendChild(startBtn);
+
+            const restartBtn = document.createElement('button');
+            restartBtn.className = 'ch-restart-btn';
+            restartBtn.title = 'Restart wrappers';
+            restartBtn.innerHTML = '↻';
+            restartBtn.onclick = (e) => { e.stopPropagation(); restartChannelWrappers(name); };
+            actions.appendChild(restartBtn);
+
             const delBtn = document.createElement('button');
             delBtn.className = 'ch-delete-btn';
             delBtn.title = 'Delete';

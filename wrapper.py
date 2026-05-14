@@ -561,7 +561,7 @@ def main():
     import urllib.error
     import urllib.request
 
-    from config_loader import apply_cli_overrides, load_config
+    from config_loader import apply_cli_overrides, load_config_with_projects as load_config
 
     # Apply AGENTCHATTR_* overrides (from CLI flags or env) BEFORE loading
     # config so the wrapper connects to the same data_dir/ports as a server
