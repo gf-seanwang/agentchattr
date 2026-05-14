@@ -6,6 +6,8 @@ __pycache__/
 *.pyo
 .env
 config.local.toml
+projects/*.toml
+!projects/.gitkeep
 *.log
 .DS_Store
 Thumbs.db

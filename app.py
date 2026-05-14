@@ -2264,27 +2264,93 @@ async def inject_command(agent_name: str, request: Request):
 
 # --- Config Reload API ---
 
+def _apply_project_channels(project_channels: dict[str, list[str]], valid_agents: set[str] | None = None) -> dict:
+    settings_changed = False
+    channels_created = []
+    invites_added = {}
+
+    channels = room_settings.setdefault("channels", ["general"])
+    ca = room_settings.setdefault("channel_agents", {})
+
+    for channel, agent_names in project_channels.items():
+        if channel not in channels:
+            if not _CHANNEL_NAME_RE.match(channel):
+                continue
+            if len(channels) >= MAX_CHANNELS:
+                continue
+            channels.append(channel)
+            channels_created.append(channel)
+            settings_changed = True
+
+        members = ca.setdefault(channel, [])
+        for agent_name in agent_names:
+            if valid_agents is not None and agent_name not in valid_agents:
+                continue
+            if agent_name not in members:
+                members.append(agent_name)
+                invites_added.setdefault(channel, []).append(agent_name)
+                settings_changed = True
+
+    if settings_changed:
+        _save_settings()
+
+    return {
+        "settings_changed": settings_changed,
+        "channels_created": channels_created,
+        "invites_added": invites_added,
+    }
+
+
 @app.post("/api/config/reload")
 async def reload_config_endpoint():
     global config
+    warnings = []
     try:
-        from config_loader import ROOT, load_config
+        from config_loader import ROOT, load_config, load_projects
         new_cfg = load_config(ROOT)
+        projects, project_warnings = load_projects(ROOT)
+        warnings.extend(project_warnings)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    new_agents = new_cfg.get("agents", {})
-    if not isinstance(new_agents, dict):
-        return JSONResponse({"error": "[agents] must be a table"}, status_code=400)
+
     if not registry:
         return JSONResponse({"error": "registry not initialized"}, status_code=500)
+
+    base_agents = dict(new_cfg.get("agents", {}))
+    all_agents = dict(base_agents)
+    project_channels = {}
+    projects_loaded = []
+
+    for channel, project in projects.items():
+        channel_agents = []
+        for agent_name, agent_cfg in project.get("agents", {}).items():
+            if agent_name in all_agents:
+                warnings.append(f"{project.get('path', channel)}: agent '{agent_name}' already exists; skipped")
+                continue
+            all_agents[agent_name] = agent_cfg
+            channel_agents.append(agent_name)
+        project_channels[channel] = channel_agents
+        projects_loaded.append(channel)
+
     try:
-        result = registry.reseed(new_agents)
-        config = {**config, "agents": new_agents}
+        result = registry.reseed(all_agents)
+        config = {**config, "agents": all_agents}
+        settings_result = _apply_project_channels(project_channels, valid_agents=set(all_agents.keys()))
         await broadcast_agents()
         await broadcast_base_colors()
+        if settings_result["settings_changed"]:
+            await broadcast_settings()
     except Exception as exc:
         return JSONResponse({"error": f"Reload failed: {exc}"}, status_code=500)
-    return JSONResponse({"ok": True, **result})
+
+    return JSONResponse({
+        "ok": True,
+        **result,
+        "projects_loaded": projects_loaded,
+        "channels_created": settings_result["channels_created"],
+        "invites_added": settings_result["invites_added"],
+        "warnings": warnings,
+    })
 
 
 # --- Skills API ---

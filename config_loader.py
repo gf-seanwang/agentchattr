@@ -135,3 +135,62 @@ def load_config(root: Path | None = None) -> dict:
     _apply_env_overrides(config)
 
     return config
+
+
+def load_projects(root: Path | None = None) -> tuple[dict[str, dict], list[str]]:
+    """Load project TOML files from projects/ directory.
+
+    Returns (projects_dict, warnings_list).
+    Each project: {"channel": str, "agents": dict, "path": str}
+    """
+    import re
+    channel_re = re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
+
+    root = root or ROOT
+    projects_dir = root / "projects"
+    if not projects_dir.exists():
+        return {}, []
+
+    projects = {}
+    warnings = []
+
+    for toml_file in sorted(projects_dir.glob("*.toml")):
+        channel_name = toml_file.stem.lower()
+
+        if not channel_re.match(channel_name):
+            warnings.append(f"{toml_file.name}: invalid channel name '{channel_name}'")
+            continue
+
+        try:
+            with open(toml_file, "rb") as f:
+                data = tomllib.load(f)
+        except Exception as exc:
+            warnings.append(f"{toml_file.name}: TOML parse error: {exc}")
+            continue
+
+        agents = data.get("agents", {})
+        if not isinstance(agents, dict):
+            warnings.append(f"{toml_file.name}: [agents] is not a table")
+            agents = {}
+
+        valid_agents = {}
+        agent_re = re.compile(r'^[a-z0-9][a-z0-9\-]{0,63}$')
+        for name, cfg in agents.items():
+            if not agent_re.match(name):
+                warnings.append(f"{toml_file.name}: invalid agent name '{name}'; skipped")
+                continue
+            if isinstance(cfg.get("cwd"), str):
+                cwd_path = Path(cfg["cwd"]).expanduser()
+                if not cwd_path.exists():
+                    warnings.append(f"{toml_file.name}: cwd for '{name}' does not exist: {cfg['cwd']}")
+                elif not cwd_path.is_dir():
+                    warnings.append(f"{toml_file.name}: cwd for '{name}' is not a directory: {cfg['cwd']}")
+            valid_agents[name] = cfg
+
+        projects[channel_name] = {
+            "channel": channel_name,
+            "agents": valid_agents,
+            "path": str(toml_file),
+        }
+
+    return projects, warnings
