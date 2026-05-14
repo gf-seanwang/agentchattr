@@ -760,8 +760,16 @@ def main():
     print(f"  Starting {command} in {cwd}...\n")
 
     _agent_restart_event = threading.Event()
+    _restart_reason = [None]
+    _heartbeat_fail_count = [0]
+    _HEARTBEAT_FAIL_THRESHOLD = 3
     _runtime_session = [""]
     _runtime_backend = [""]
+
+    def _request_restart(reason: str):
+        if _restart_reason[0] != "server_lost":
+            _restart_reason[0] = reason
+        _agent_restart_event.set()
 
     def _heartbeat():
         while True:
@@ -781,24 +789,33 @@ def main():
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resp_data = json.loads(resp.read())
+                _heartbeat_fail_count[0] = 0
                 server_name = resp_data.get("name", current_name)
                 if server_name != current_name:
                     if set_runtime_identity(server_name) and not needs_proxy:
-                        _agent_restart_event.set()
+                        _request_restart("credentials")
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
+                    _heartbeat_fail_count[0] = 0
                     try:
                         replacement = _register_instance(server_port, agent, args.label)
                         if set_runtime_identity(replacement["name"], replacement["token"]) and not needs_proxy:
-                            _agent_restart_event.set()
+                            _request_restart("credentials")
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
                         pass
-                time.sleep(5)
-                continue
+                    time.sleep(5)
+                    continue
+                _heartbeat_fail_count[0] += 1
             except Exception:
-                time.sleep(5)
-                continue
+                _heartbeat_fail_count[0] += 1
+
+            if (
+                _heartbeat_fail_count[0] >= _HEARTBEAT_FAIL_THRESHOLD
+                and not _agent_restart_event.is_set()
+            ):
+                print("\n  Server lost. Triggering agent restart...")
+                _request_restart("server_lost")
 
             time.sleep(5)
 
@@ -963,15 +980,52 @@ def main():
         except Exception as exc:
             print(f"\n  Agent exited unexpectedly: {exc}")
 
-        if _agent_restart_event.is_set():
-            _agent_restart_event.clear()
+        def stop_wrapper():
             if _watcher_stop is not None:
                 _watcher_stop.set()
+            if proxy is not None:
+                proxy.stop()
+            print("  Wrapper stopped.")
+
+        if _agent_restart_event.is_set():
+            _agent_restart_event.clear()
+            reason = _restart_reason[0]
+            _restart_reason[0] = None
+
+            if _watcher_stop is not None:
+                _watcher_stop.set()
+
+            if reason == "server_lost":
+                if args.no_restart:
+                    print("\n  Server disconnected. --no-restart set, exiting.")
+                    stop_wrapper()
+                    break
+                print("\n  Server disconnected. Waiting for server to come back...")
+                wait = 3
+                while True:
+                    try:
+                        re_reg = _register_with_retry(server_port, agent, args.label, max_wait=86400)
+                        set_runtime_identity(re_reg["name"], re_reg["token"])
+                        print(f"  Reconnected as: {re_reg['name']}")
+                        break
+                    except SystemExit:
+                        pass
+                    time.sleep(wait)
+                    wait = min(wait * 2, 30)
+
+            # Clear any stale restart events set by heartbeat during reconnect wait
+            _agent_restart_event.clear()
+            _restart_reason[0] = None
+            _heartbeat_fail_count[0] = 0
+
             current_name = rebuild_launch_for_current_identity()
-            print(f"  Restarting agent session with refreshed credentials for @{current_name}...")
+            if reason == "server_lost":
+                print(f"  Restarting agent session after server reconnect for @{current_name}...")
+            else:
+                print(f"  Restarting agent session with refreshed credentials for @{current_name}...")
             continue
 
-        # Check if server is still alive — if not, wait for it to come back
+        # Check if server is still alive (agent exited without restart event)
         server_alive = False
         try:
             current_name, _ = get_identity()
@@ -984,13 +1038,6 @@ def main():
             server_alive = True
         except Exception:
             pass
-
-        def stop_wrapper():
-            if _watcher_stop is not None:
-                _watcher_stop.set()
-            if proxy is not None:
-                proxy.stop()
-            print("  Wrapper stopped.")
 
         if not server_alive:
             if args.no_restart:
@@ -1011,7 +1058,9 @@ def main():
                     pass
                 time.sleep(wait)
                 wait = min(wait * 2, 30)
-            # Rebuild launch args with new token/identity
+            _agent_restart_event.clear()
+            _restart_reason[0] = None
+            _heartbeat_fail_count[0] = 0
             rebuild_launch_for_current_identity()
             continue
 
