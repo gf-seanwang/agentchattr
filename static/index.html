@@ -71,6 +71,16 @@
                 </select>
             </div>
             <div class="settings-field">
+                <label for="setting-font-size">Font size</label>
+                <div class="sched-num-wrap">
+                    <input type="number" id="setting-font-size" class="sched-pop-num" min="10" max="24" value="14" title="Chat font size in pixels">
+                    <div class="sched-num-btns">
+                        <button type="button" onclick="stepNumInput('setting-font-size',1)" tabindex="-1">&#9650;</button>
+                        <button type="button" onclick="stepNumInput('setting-font-size',-1)" tabindex="-1">&#9660;</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-field">
                 <label for="setting-hops">Loop guard</label>
                 <div class="sched-num-wrap">
                     <input type="number" id="setting-hops" class="sched-pop-num" min="1" max="50" value="4" title="Max agent-to-agent hops before pausing">

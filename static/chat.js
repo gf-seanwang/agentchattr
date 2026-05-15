@@ -501,6 +501,7 @@ function init() {
     setupPaste();
     setupScroll();
     setupSettingsKeys();
+    initFontSize();
     setupKeyboardShortcuts();
     RulesPanel.init();
     Jobs.init();
@@ -2239,6 +2240,34 @@ function setupSettingsKeys() {
             }
         });
     }
+}
+
+// --- Font size ---
+
+function initFontSize() {
+    const saved = localStorage.getItem('agentchattr-font-size');
+    const el = document.getElementById('setting-font-size');
+    if (saved) {
+        el.value = saved;
+        applyFontSize(saved);
+    }
+    el.addEventListener('change', () => {
+        const size = el.value;
+        localStorage.setItem('agentchattr-font-size', size);
+        applyFontSize(size);
+    });
+    el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const size = el.value;
+            localStorage.setItem('agentchattr-font-size', size);
+            applyFontSize(size);
+        }
+        if (e.key === 'Escape') toggleSettings();
+    });
+}
+
+function applyFontSize(size) {
+    document.getElementById('messages').style.fontSize = size + 'px';
 }
 
 // --- Toast notifications ---
