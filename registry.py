@@ -115,6 +115,12 @@ class RuntimeRegistry:
             for name, cfg in base_items.items():
                 self._bases[name] = cfg
 
+    def clear_reserved_for(self, base: str):
+        with self._lock:
+            to_remove = [n for n in self._reserved if n == base or n.startswith(base + "-")]
+            for n in to_remove:
+                self._reserved.pop(n, None)
+
     def reseed(self, agents_config: dict) -> dict:
         """Re-read config and add/update base agents without affecting instances."""
         base_items = {}

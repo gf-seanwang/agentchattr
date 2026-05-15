@@ -2300,10 +2300,16 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
             return "error", f"Unknown agent: {agent_name}"
 
         import mcp_bridge
+
+        # Clean up ALL instances for this base before launching
+        # Managed launch owns this agent — no instance should exist
         instances = registry.get_instances_for(agent_name)
-        online = [i for i in instances if mcp_bridge.is_online(i["name"])]
-        if online:
-            return "skipped", "already_online"
+        for inst in instances:
+            inst_name = inst["name"]
+            registry.deregister(inst_name)
+            mcp_bridge.purge_identity(inst_name)
+        # Clear reserved names so new register gets slot 1
+        registry.clear_reserved_for(agent_name)
 
         root = Path(__file__).parent
         venv_python = root / "venv" / "bin" / "python"
