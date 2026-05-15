@@ -2311,6 +2311,17 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         # Clear reserved names so new register gets slot 1
         registry.clear_reserved_for(agent_name)
 
+        # Kill orphan managed tmux sessions from previous server runs
+        try:
+            result = _sp.run(["tmux", "ls", "-F", "#{session_name}"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                prefix = f"agentchattr-managed-{_re_mod.sub(r'[^a-zA-Z0-9_.-]', '_', agent_name)[:60]}-"
+                for sess in result.stdout.strip().splitlines():
+                    if sess.startswith(prefix):
+                        _sp.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+        except Exception:
+            pass
+
         root = Path(__file__).parent
         venv_python = root / "venv" / "bin" / "python"
         python = str(venv_python) if venv_python.exists() else _sys.executable
