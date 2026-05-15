@@ -198,8 +198,8 @@ def run_agent(
                     time.sleep(1)
                 break
 
-            # Session gone — agent exited
-            if no_restart:
+            # Session gone — agent exited (not by restart event)
+            if no_restart and not monitor_killed.is_set():
                 break
 
             print(f"\n  {agent.capitalize()} exited.")
