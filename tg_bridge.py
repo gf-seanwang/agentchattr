@@ -117,17 +117,31 @@ class _TelegramBot:
             return {"ok": False}
 
     def get_updates(self, offset: int = 0, timeout: int = 1) -> list[dict]:
-        params: dict = {"timeout": timeout, "allowed_updates": ["message"]}
+        params: dict = {"timeout": timeout, "allowed_updates": ["message", "callback_query"]}
         if offset:
             params["offset"] = offset
         result = self._call("getUpdates", params)
         return result.get("result", []) if result.get("ok") else []
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> dict:
+        data: dict = {"callback_query_id": callback_query_id}
+        if text:
+            data["text"] = text
+        return self._call("answerCallbackQuery", data)
 
     def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
         data: dict = {"chat_id": chat_id, "text": text}
         if reply_markup:
             data["reply_markup"] = reply_markup
         return self._call("sendMessage", data)
+
+    def edit_message_reply_markup(self, chat_id: str, message_id: int, reply_markup: dict | None = None) -> dict:
+        data: dict = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        else:
+            data["reply_markup"] = {"inline_keyboard": []}
+        return self._call("editMessageReplyMarkup", data)
 
     def set_reply_keyboard(self, chat_id: str, buttons: list[list[str]], text: str = "⌨️") -> dict:
         keyboard = {"keyboard": [[{"text": b} for b in row] for row in buttons], "resize_keyboard": True}
@@ -336,11 +350,129 @@ class TGBridge:
 
     # --- Polling ---
 
+    def _handle_callback_query(self, update: dict):
+        """Handle inline keyboard button presses (decision choices)."""
+        cb = update.get("callback_query", {})
+        cb_id = cb.get("id", "")
+        data = cb.get("data", "")
+
+        # Auth: validate user and chat binding
+        cb_user = cb.get("from", {})
+        cb_user_id = str(cb_user.get("id", ""))
+        cb_username = cb_user.get("username", "")
+        if self.allowed_users and cb_username not in self.allowed_users and cb_user_id not in self.allowed_users:
+            self.bot.answer_callback_query(cb_id, "Unauthorized")
+            return
+        cb_chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+        bound = self._bound_chat_id()
+        if not bound or cb_chat_id != bound:
+            self.bot.answer_callback_query(cb_id, "No active chat binding")
+            return
+
+        if not data.startswith("decide:"):
+            self.bot.answer_callback_query(cb_id, "Unknown action")
+            return
+        parts = data.split(":")
+        if len(parts) < 3:
+            self.bot.answer_callback_query(cb_id, "Invalid data")
+            return
+        try:
+            msg_id = int(parts[1])
+            choice_idx = int(parts[2])
+        except ValueError:
+            self.bot.answer_callback_query(cb_id, "Invalid data")
+            return
+        # Check and claim under lock — no TG API calls inside lock
+        error_msg = None
+        choice = None
+        sender = ""
+        channel = "general"
+        msg = None
+        meta = {}
+        try:
+            with self.store._lock:
+                for m in self.store._messages:
+                    if m["id"] == msg_id:
+                        msg = m
+                        break
+                if not msg or msg.get("type") != "decision":
+                    error_msg = "Message not found"
+                else:
+                    meta = msg.get("metadata") or {}
+                    if meta.get("resolved"):
+                        error_msg = f"Already chosen: {meta.get('chosen', '')}"
+                    else:
+                        choices = meta.get("choices", [])
+                        if choice_idx < 0 or choice_idx >= len(choices):
+                            error_msg = "Invalid choice"
+                        else:
+                            choice = choices[choice_idx]
+                            sender = msg.get("sender", "")
+                            channel = msg.get("channel", "general")
+                            meta["resolved"] = True
+                            meta["chosen"] = choice
+                            msg["metadata"] = meta
+                            self.store._rewrite()
+        except Exception as e:
+            log.error("Failed to resolve decision: %s", e)
+            self.bot.answer_callback_query(cb_id, "Error")
+            return
+
+        if error_msg:
+            self.bot.answer_callback_query(cb_id, error_msg)
+            return
+
+        # Add reply outside lock
+        username = self.room_settings.get("username", "user")
+        reply_text = f"@{sender} {choice}" if sender else choice
+        try:
+            self.store.add(username, reply_text, reply_to=msg_id, channel=channel)
+        except Exception as e:
+            log.error("Failed to add decision reply, rolling back: %s", e)
+            with self.store._lock:
+                meta["resolved"] = False
+                meta.pop("chosen", None)
+                msg["metadata"] = meta
+                self.store._rewrite()
+            self.bot.answer_callback_query(cb_id, "Error saving reply")
+            return
+
+        # Remove inline buttons from TG message
+        decision_tg = self.state.get("decision_tg_msgs", {})
+        entry = decision_tg.get(str(msg_id))
+        if entry and isinstance(entry, dict):
+            tg_msg_id = entry.get("tg_msg_id")
+            orig_chat = entry.get("chat_id", "")
+            if tg_msg_id and orig_chat:
+                if self.bot.edit_message_reply_markup(orig_chat, tg_msg_id).get("ok", False):
+                    decision_tg.pop(str(msg_id), None)
+                    _save_state(self.state)
+
+        # Broadcast update to web clients
+        try:
+            import asyncio as _aio
+            from app import _broadcast, _event_loop
+            updated = self.store.get_by_id(msg_id)
+            if updated and _event_loop:
+                _aio.run_coroutine_threadsafe(
+                    _broadcast(json.dumps({"type": "message_update", "message": updated})),
+                    _event_loop,
+                )
+        except Exception:
+            pass
+        self.bot.answer_callback_query(cb_id, f"✓ {choice}")
+
     def _poll_telegram(self):
         offset = self.state.get("telegram_update_offset", 0)
         updates = self.bot.get_updates(offset=offset)
         for update in updates:
             uid = update.get("update_id", 0)
+
+            # Handle inline button callbacks
+            if "callback_query" in update:
+                self._handle_callback_query(update)
+                self.state["telegram_update_offset"] = uid + 1
+                continue
 
             msg = update.get("message", {})
             chat_id = str(msg.get("chat", {}).get("id", ""))
@@ -423,13 +555,26 @@ class TGBridge:
             label = self._get_agent_label(sender)
             tg_text = self._format_for_telegram(f"[{label}]\n{m.get('text', '')}")
 
+            # Build inline keyboard for decision messages
+            reply_markup = None
+            choices = meta.get("choices", [])
+            if m.get("type") == "decision" and choices and not meta.get("resolved"):
+                buttons = [[{"text": c, "callback_data": f"decide:{mid}:{i}"}] for i, c in enumerate(choices)]
+                reply_markup = {"inline_keyboard": buttons}
+
             if delivered.get(mid_str) == "sent":
                 if mid > safe_cursor:
                     safe_cursor = mid
                 continue
 
-            if self.bot.send_message(bound, tg_text).get("ok", False):
+            send_result = self.bot.send_message(bound, tg_text, reply_markup=reply_markup)
+            if send_result.get("ok", False):
                 delivered[mid_str] = "sent"
+                if reply_markup:
+                    tg_msg_id = send_result.get("result", {}).get("message_id")
+                    if tg_msg_id:
+                        decision_tg = self.state.setdefault("decision_tg_msgs", {})
+                        decision_tg[mid_str] = {"tg_msg_id": tg_msg_id, "chat_id": bound}
                 if mid > safe_cursor:
                     safe_cursor = mid
             else:
@@ -437,13 +582,32 @@ class TGBridge:
                 any_failure = True
                 break
 
+        # Clean up decisions resolved from web UI
+        state_dirty = False
+        decision_tg = self.state.get("decision_tg_msgs", {})
+        if decision_tg:
+            for dmid_str in list(decision_tg.keys()):
+                dmsg = self.store.get_by_id(int(dmid_str))
+                if dmsg and (dmsg.get("metadata") or {}).get("resolved"):
+                    entry = decision_tg[dmid_str]
+                    if isinstance(entry, dict):
+                        tg_msg_id = entry.get("tg_msg_id")
+                        orig_chat = entry.get("chat_id", "")
+                    else:
+                        tg_msg_id = entry
+                        orig_chat = bound
+                    if tg_msg_id and orig_chat:
+                        if self.bot.edit_message_reply_markup(orig_chat, tg_msg_id).get("ok", False):
+                            decision_tg.pop(dmid_str)
+                            state_dirty = True
+
         if safe_cursor > since_id:
             self.state["cursor"] = safe_cursor
             old_keys = [k for k in list(delivered.keys()) if int(k) <= safe_cursor]
             for k in old_keys:
                 del delivered[k]
-            _save_state(self.state)
-        elif any_failure:
+            state_dirty = True
+        if state_dirty or any_failure:
             _save_state(self.state)
 
     _TRUNCATION_NOTICE = "\n\n[...truncated, see web UI for full message]"
