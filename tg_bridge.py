@@ -155,11 +155,17 @@ class TGBridge:
 
     @property
     def running(self) -> bool:
-        return self._running and self._thread is not None and self._thread.is_alive()
+        with self._lock:
+            return self._running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def stopping(self) -> bool:
+        with self._lock:
+            return not self._running and self._thread is not None and self._thread.is_alive()
 
     def start(self):
         with self._lock:
-            if self.running:
+            if self._thread is not None and self._thread.is_alive():
                 return
             self._running = True
             self._thread = threading.Thread(target=self._loop, daemon=True, name="tg-bridge")
@@ -170,9 +176,10 @@ class TGBridge:
         with self._lock:
             self._running = False
             t = self._thread
-            self._thread = None
         if t:
             t.join(timeout=35)
+        with self._lock:
+            self._thread = None
         log.info("TG Bridge stopped")
 
     # --- Chat binding ---
@@ -314,12 +321,13 @@ class TGBridge:
         offset = self.state.get("telegram_update_offset", 0)
         updates = self.bot.get_updates(offset=offset)
         for update in updates:
-            self.state["telegram_update_offset"] = update.get("update_id", 0) + 1
+            uid = update.get("update_id", 0)
 
             msg = update.get("message", {})
             chat_id = str(msg.get("chat", {}).get("id", ""))
             text = msg.get("text", "").strip()
             if not chat_id or not text:
+                self.state["telegram_update_offset"] = uid + 1
                 continue
 
             user = msg.get("from", {})
@@ -329,11 +337,13 @@ class TGBridge:
             # Auth: allowed_users check (username or user_id only, not first_name)
             if self.allowed_users and tg_username not in self.allowed_users and user_id not in self.allowed_users:
                 log.debug("Rejected unauthorized user: %s (%s)", tg_username or user.get("first_name", "?"), user_id)
+                self.state["telegram_update_offset"] = uid + 1
                 continue
 
             # Chat binding: only accept from bound/configured chat
             if not self._resolve_or_bind_chat(chat_id):
                 log.debug("Rejected message from non-bound chat: %s", chat_id)
+                self.state["telegram_update_offset"] = uid + 1
                 continue
 
             safe_sender = _safe_tg_sender(user)
@@ -342,18 +352,24 @@ class TGBridge:
             if text.startswith("/"):
                 result = self._handle_command(text, chat_id)
                 if result is True:
+                    self.state["telegram_update_offset"] = uid + 1
                     continue
                 if isinstance(result, tuple):
                     _, text = result
 
-            self.store.add(f"tg:{safe_sender}", text, channel=self.channel,
-                           metadata={
-                               "source": "telegram",
-                               "tg_chat_id": chat_id,
-                               "tg_user_id": user_id,
-                               "tg_username": tg_username,
-                               "tg_first_name": user.get("first_name", ""),
-                           })
+            try:
+                self.store.add(f"tg:{safe_sender}", text, channel=self.channel,
+                               metadata={
+                                   "source": "telegram",
+                                   "tg_chat_id": chat_id,
+                                   "tg_user_id": user_id,
+                                   "tg_username": tg_username,
+                                   "tg_first_name": user.get("first_name", ""),
+                               })
+                self.state["telegram_update_offset"] = uid + 1
+            except Exception as e:
+                log.error("Failed to persist TG message, will retry: %s", e)
+                break
 
         if updates:
             _save_state(self.state)
@@ -370,6 +386,8 @@ class TGBridge:
         any_failure = False
 
         for m in msgs:
+            if not self._running:
+                break
             mid = m.get("id", 0)
             mid_str = str(mid)
             sender = m.get("sender", "")

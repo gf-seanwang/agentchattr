@@ -3359,7 +3359,8 @@ async def tg_bridge_start():
         if _tg_bridge:
             if _tg_bridge.running:
                 return JSONResponse({"error": "bridge already running", "channel": _tg_bridge.channel}, status_code=409)
-            return JSONResponse({"error": "bridge is stopping, try again shortly"}, status_code=409)
+            if _tg_bridge.stopping:
+                return JSONResponse({"error": "bridge is stopping, try again shortly"}, status_code=409)
         from tg_bridge import TGBridge, load_config, check_config, validate_runtime
         errors = check_config()
         if errors:
@@ -3380,7 +3381,11 @@ async def tg_bridge_stop():
     """Stop TG bridge without blocking the event loop."""
     global _tg_bridge
     with _tg_bridge_lock:
-        if not _tg_bridge or not _tg_bridge.running:
+        if not _tg_bridge:
+            return {"ok": True, "was_running": False}
+        if _tg_bridge.stopping:
+            return JSONResponse({"error": "bridge is already stopping"}, status_code=409)
+        if not _tg_bridge.running:
             _tg_bridge = None
             return {"ok": True, "was_running": False}
         bridge = _tg_bridge
