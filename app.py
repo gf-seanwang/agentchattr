@@ -2317,6 +2317,22 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
 
         import re as _re_mod
 
+        # Kill orphan wrapper processes for this agent
+        try:
+            ps_result = _sp.run(["pgrep", "-f", f"wrapper.py {agent_name}"], capture_output=True, text=True, timeout=3)
+            if ps_result.returncode == 0:
+                for pid_str in ps_result.stdout.strip().splitlines():
+                    pid = int(pid_str.strip())
+                    try:
+                        import os as _os
+                        _os.kill(pid, 15)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                import time as _time_mod
+                _time_mod.sleep(1)
+        except Exception:
+            pass
+
         # Kill orphan managed tmux sessions from previous server runs
         try:
             result = _sp.run(["tmux", "ls", "-F", "#{session_name}"], capture_output=True, text=True, timeout=3)
