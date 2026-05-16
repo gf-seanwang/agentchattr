@@ -421,16 +421,42 @@ class TGBridge:
         if bound:
             self._refresh_keyboard(bound)
 
+    # --- Startup ---
+
+    def _ensure_cursor_channel(self):
+        stored = self.state.get("cursor_channel")
+        if stored == self.channel:
+            return
+        self.state["cursor"] = -1
+        self.state["cursor_channel"] = self.channel
+        self.state.pop("delivered", None)
+        _save_state(self.state)
+        log.info("Cursor channel changed from %r to %r; cursor reset", stored, self.channel)
+
+    def _ensure_outbound_cursor(self):
+        if self.state.get("cursor", -1) >= 0:
+            return
+        msgs = self.store.get_since(-1, channel=self.channel)
+        self.state["cursor"] = max((m.get("id", 0) for m in msgs), default=0)
+        _save_state(self.state)
+
+    def _drain_telegram_backlog(self):
+        if self.state.get("telegram_backlog_drained"):
+            return
+        updates = self.bot.get_updates(offset=-1, timeout=0)
+        if updates:
+            latest = max(u.get("update_id", 0) for u in updates)
+            self.state["telegram_update_offset"] = latest + 1
+            log.info("Drained pending TG updates, starting from offset %d", latest + 1)
+        self.state["telegram_backlog_drained"] = True
+        _save_state(self.state)
+
     # --- Main loop ---
 
     def _loop(self):
-        if self.state.get("cursor", -1) < 0:
-            msgs = self.store.get_since(-1, channel=self.channel)
-            if msgs:
-                self.state["cursor"] = max(m.get("id", 0) for m in msgs)
-            else:
-                self.state["cursor"] = 0
-            _save_state(self.state)
+        self._ensure_cursor_channel()
+        self._ensure_outbound_cursor()
+        self._drain_telegram_backlog()
 
         while self._running:
             try:
