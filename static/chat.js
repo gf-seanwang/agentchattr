@@ -2105,6 +2105,7 @@ function applySettings(data) {
     }
     if (data.channel_agents || data.channels) {
         buildStatusPills();
+        buildMentionToggles();
     }
 }
 
@@ -2473,12 +2474,16 @@ function getMentionCandidates() {
     const isInviteCmd = input && /^\/invite\s/.test(input.value);
     for (const [name, cfg] of Object.entries(agentConfig)) {
         if (cfg.state === 'pending') continue;
+        const status = latestStatus[name] || {};
         if (!isGeneral) {
             if (isInviteCmd) {
                 if (allowed && allowed.includes(name)) continue;
             } else {
                 if (!allowed || !allowed.includes(name)) continue;
+                if (!status.available) continue;
             }
+        } else {
+            if (!status.available) continue;
         }
         candidates.push({ name, label: cfg.label || name, color: cfg.color });
     }
@@ -3387,13 +3392,17 @@ function buildMentionToggles() {
     const container = document.getElementById('mention-toggles');
     container.innerHTML = '';
 
+    const allowed = (window.channelAgents || {})[activeChannel];
+    const isGeneral = activeChannel === 'general';
+
     // Prune stale mentions for agents no longer in config
     for (const name of activeMentions) {
         if (!(name in agentConfig)) activeMentions.delete(name);
     }
 
     for (const [name, cfg] of Object.entries(agentConfig)) {
-        if (cfg.state === 'pending') continue;  // skip pending instances
+        if (cfg.state === 'pending') continue;
+        if (allowed && !allowed.includes(name)) continue;
         const btn = document.createElement('button');
         btn.className = 'mention-toggle';
         btn.dataset.agent = name;

@@ -230,12 +230,23 @@ class MessageStore:
                 self._rewrite_jsonl()
 
     def rename_sender(self, old_name: str, new_name: str) -> int:
-        """Rename sender on all messages from old_name to new_name. Returns count updated."""
+        """Rename sender on all messages from old_name to new_name.
+        Also replaces @old_name mentions in message text. Returns count updated."""
+        import re
+        mention_pat = re.compile(r'@' + re.escape(old_name) + r'(?=[\s,;:.!?\'")\]}>]|$)', re.IGNORECASE)
         with self._lock:
             count = 0
             for m in self._messages:
+                changed = False
                 if m.get("sender") == old_name:
                     m["sender"] = new_name
+                    changed = True
+                text = m.get("text", "")
+                new_text = mention_pat.sub(f"@{new_name}", text)
+                if new_text != text:
+                    m["text"] = new_text
+                    changed = True
+                if changed:
                     count += 1
             if count:
                 self._rewrite_jsonl()

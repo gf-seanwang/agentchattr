@@ -315,6 +315,7 @@ function switchChannel(name) {
     filterMessagesByChannel();
     renderChannelTabs();
     buildStatusPills();
+    buildMentionToggles();
     Store.set('activeChannel', name);
     // Restore: scroll to saved message, or bottom if none saved
     const savedId = _channelScrollMsg[name];
