@@ -230,6 +230,44 @@ async function reloadConfig() {
     }
 }
 
+async function parseWrapperResponse(resp) {
+    let data = null;
+    try { data = await resp.json(); } catch (_) { data = {}; }
+    if (!resp.ok || data.ok === false) {
+        const message = data.error || (Array.isArray(data.errors) && data.errors[0]?.error) || `HTTP ${resp.status}`;
+        throw new Error(message);
+    }
+    return data;
+}
+
+async function startSingleWrapper(agentName) {
+    try {
+        const resp = await fetch('/api/wrappers/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
+            body: JSON.stringify({ agents: [agentName] }),
+        });
+        const data = await parseWrapperResponse(resp);
+        console.log('Wrapper started:', data);
+    } catch (e) {
+        console.error('Failed to start wrapper:', e);
+    }
+}
+
+async function restartSingleWrapper(agentName) {
+    try {
+        const resp = await fetch('/api/wrappers/restart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
+            body: JSON.stringify({ agents: [agentName] }),
+        });
+        const data = await parseWrapperResponse(resp);
+        console.log('Wrapper restarted:', data);
+    } catch (e) {
+        console.error('Failed to restart wrapper:', e);
+    }
+}
+
 async function startChannelWrappers(channel) {
     try {
         const resp = await fetch('/api/wrappers/start', {
@@ -762,6 +800,7 @@ function connectWebSocket() {
             applyAgentConfig(event.data);
         } else if (event.type === 'base_colors') {
             baseColors = event.data || {};
+            buildStatusPills();
         } else if (event.type === 'todos') {
             todos = {};
             for (const [id, status] of Object.entries(event.data)) {
@@ -1452,9 +1491,19 @@ function buildStatusPills() {
             _buildPill(container, name, cfg, status);
         }
     } else if (isGeneral) {
+        const seen = new Set();
         for (const [name, cfg] of Object.entries(agentConfig)) {
+            seen.add(name);
             const status = latestStatus[name] || {};
             _buildPill(container, name, cfg, status);
+        }
+        const activeBases = new Set(
+            Object.values(agentConfig).map(c => c.base).filter(Boolean)
+        );
+        for (const baseName of Object.keys(baseColors)) {
+            if (!seen.has(baseName) && !activeBases.has(baseName)) {
+                _buildPill(container, baseName, null, {});
+            }
         }
     }
     if (!container.dataset.dragScrollEnabled) {
@@ -1513,6 +1562,31 @@ function _buildPill(container, name, cfg, status) {
             interruptAgent(name);
         });
         pill.appendChild(stopBtn);
+    }
+    const baseId = cfg?.base || name;
+    const siblingCount = Object.values(agentConfig).filter(c => c.base === baseId).length;
+    const canLifecycle = siblingCount <= 1;
+    if (!isAvailable && canLifecycle) {
+        const startBtn = document.createElement('button');
+        startBtn.className = 'pill-start-btn';
+        startBtn.textContent = '▶';
+        startBtn.title = `Start ${label}`;
+        startBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startSingleWrapper(baseId);
+        });
+        pill.appendChild(startBtn);
+    }
+    if (isAvailable && !showStop && canLifecycle) {
+        const restartBtn = document.createElement('button');
+        restartBtn.className = 'pill-restart-btn';
+        restartBtn.textContent = '↻';
+        restartBtn.title = `Restart ${label}`;
+        restartBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            restartSingleWrapper(baseId);
+        });
+        pill.appendChild(restartBtn);
     }
     container.appendChild(pill);
 }

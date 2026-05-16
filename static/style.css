@@ -281,6 +281,20 @@ header h1 {
     opacity: 1;
     color: #ef4444;
 }
+.pill-start-btn, .pill-restart-btn {
+    background: none;
+    border: none;
+    margin-left: 4px;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 11px;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+    padding: 0 2px;
+    line-height: 1;
+}
+.pill-start-btn:hover { opacity: 1; color: var(--online, #4ade80); }
+.pill-restart-btn:hover { opacity: 1; color: var(--accent); }
 
 .skill-cli-badge {
     font-size: 9px;
