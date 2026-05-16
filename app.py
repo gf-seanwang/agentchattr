@@ -46,6 +46,10 @@ ws_clients: set[WebSocket] = set()
 # --- Security: session token (set by configure()) ---
 session_token: str = ""
 
+# --- TG Bridge ---
+_tg_bridge = None
+_tg_bridge_lock = threading.Lock()
+
 # Room settings (persisted to data/settings.json)
 room_settings: dict = {
     "title": "agentchattr",
@@ -3330,3 +3334,58 @@ async def serve_upload(filename: str):
     if filepath.exists():
         return FileResponse(filepath)
     return JSONResponse({"error": "not found"}, status_code=404)
+
+
+# --- TG Bridge API ---
+
+@app.get("/api/tg-bridge/health")
+async def tg_bridge_health():
+    """Return TG bridge status."""
+    from tg_bridge import check_config
+    errors = check_config()
+    return {
+        "running": _tg_bridge is not None and _tg_bridge.running,
+        "channel": _tg_bridge.channel if _tg_bridge else None,
+        "config_ok": len(errors) == 0,
+        "config_errors": errors,
+    }
+
+
+@app.post("/api/tg-bridge/start")
+async def tg_bridge_start():
+    """Start TG bridge as background thread."""
+    global _tg_bridge
+    with _tg_bridge_lock:
+        if _tg_bridge:
+            if _tg_bridge.running:
+                return JSONResponse({"error": "bridge already running", "channel": _tg_bridge.channel}, status_code=409)
+            return JSONResponse({"error": "bridge is stopping, try again shortly"}, status_code=409)
+        from tg_bridge import TGBridge, load_config, check_config, validate_runtime
+        errors = check_config()
+        if errors:
+            return JSONResponse({"error": errors[0], "config_errors": errors}, status_code=400)
+        cfg = load_config()
+        if not cfg:
+            return JSONResponse({"error": "tg_config.toml not found"}, status_code=404)
+        rt_errors, rt_warnings = validate_runtime(cfg, room_settings)
+        if rt_errors:
+            return JSONResponse({"error": rt_errors[0], "config_errors": rt_errors}, status_code=400)
+        _tg_bridge = TGBridge(cfg, store, registry, room_settings)
+        _tg_bridge.start()
+    return {"ok": True, "channel": _tg_bridge.channel, "warnings": rt_warnings}
+
+
+@app.post("/api/tg-bridge/stop")
+async def tg_bridge_stop():
+    """Stop TG bridge without blocking the event loop."""
+    global _tg_bridge
+    with _tg_bridge_lock:
+        if not _tg_bridge or not _tg_bridge.running:
+            _tg_bridge = None
+            return {"ok": True, "was_running": False}
+        bridge = _tg_bridge
+    await asyncio.get_event_loop().run_in_executor(None, bridge.stop)
+    with _tg_bridge_lock:
+        if _tg_bridge is bridge:
+            _tg_bridge = None
+    return {"ok": True, "was_running": True}

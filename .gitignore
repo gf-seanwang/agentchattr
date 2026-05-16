@@ -6,6 +6,8 @@ __pycache__/
 *.pyo
 .env
 config.local.toml
+tg_config.toml
+tg_state.json
 projects/*.toml
 !projects/.gitkeep
 *.log

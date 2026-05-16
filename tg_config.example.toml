@@ -1,0 +1,22 @@
+# TG Bridge config — one bot per channel, runs inside server.
+# Copy to tg_config.toml and fill in your settings.
+#
+# Setup:
+# 1. Create a bot via @BotFather on Telegram (/newbot)
+# 2. Fill in bot_token, channel, and allowed_users below
+# 3. Start from Settings UI or POST /api/tg-bridge/start
+# 4. DM the bot — it will auto-bind to that chat
+#
+# For multiple channels, create multiple bots (one per channel).
+
+bot_token = "123456:ABC-DEF..."
+channel = "refactor"
+poll_interval_seconds = 1.5
+
+# Security: only these Telegram users can interact with the bot.
+# Use usernames (without @) or numeric user IDs.
+allowed_users = ["your_tg_username"]
+
+# Optional: lock the bot to a specific Telegram chat ID.
+# If not set, the bot auto-binds to the first allowed user's chat.
+# chat_id = "123456789"
