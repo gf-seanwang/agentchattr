@@ -152,6 +152,7 @@ class TGBridge:
         self._lock = threading.Lock()
         self._last_keyboard: dict[str, list] = {}
         self._last_keyboard_refresh = 0.0
+        self._pending_mention: dict[str, str] = {}  # chat_id -> "@agent-name"
 
     @property
     def running(self) -> bool:
@@ -289,9 +290,27 @@ class TGBridge:
             mentions = " ".join(f"@{a}" for a in agents)
             return (False, f"{mentions} {rest}")
 
+        if cmd == "/cancel":
+            if chat_id in self._pending_mention:
+                cleared = self._pending_mention.pop(chat_id)
+                self.bot.send_message(chat_id, f"✗ {cleared} 已��消")
+            else:
+                self.bot.send_message(chat_id, "沒有待送出的 mention")
+            return True
+
         if cmd == "/unbind":
             result = self._unbind_chat(chat_id)
             self.bot.send_message(chat_id, result)
+            return True
+
+        # /agent-name [msg] — convert to @agent-name mention
+        agent_name = cmd.lstrip("/")
+        agents = self._get_agents_in_channel()
+        if agent_name in agents:
+            if rest:
+                return (False, f"@{agent_name} {rest}")
+            self._pending_mention[chat_id] = f"@{agent_name}"
+            self.bot.send_message(chat_id, f"✓ @{agent_name} — 請輸入訊息")
             return True
 
         return False
@@ -305,13 +324,13 @@ class TGBridge:
         rows = []
         row = []
         for name in agents:
-            row.append(f"@{name}")
+            row.append(f"/{name}")
             if len(row) >= 3:
                 rows.append(row)
                 row = []
         if row:
             rows.append(row)
-        rows.append(["/agents", "/status", "/all"])
+        rows.append(["/all", "/cancel", "/agents"])
         self.bot.set_reply_keyboard(chat_id, rows, text=f"#{self.channel}")
         self._last_keyboard[chat_id] = list(agents)
 
@@ -356,9 +375,12 @@ class TGBridge:
                     continue
                 if isinstance(result, tuple):
                     _, text = result
+            elif chat_id in self._pending_mention:
+                text = f"{self._pending_mention.pop(chat_id)} {text}"
 
             try:
-                self.store.add(f"tg:{safe_sender}", text, channel=self.channel,
+                display_sender = self.room_settings.get("username", f"tg:{safe_sender}")
+                self.store.add(display_sender, text, channel=self.channel,
                                metadata={
                                    "source": "telegram",
                                    "tg_chat_id": chat_id,
@@ -391,7 +413,9 @@ class TGBridge:
             mid = m.get("id", 0)
             mid_str = str(mid)
             sender = m.get("sender", "")
-            if sender.startswith("tg:") or m.get("type") in ("system", "join", "leave") or sender not in known:
+            meta = m.get("metadata") or {}
+            is_from_tg = sender.startswith("tg:") or meta.get("source") == "telegram"
+            if is_from_tg or m.get("type") in ("system", "join", "leave"):
                 if mid > safe_cursor:
                     safe_cursor = mid
                 continue
