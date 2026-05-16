@@ -12,6 +12,7 @@ How it works:
 """
 
 import shlex
+import os
 import shutil
 import subprocess
 import sys
@@ -167,14 +168,21 @@ def run_agent(
             if restart_event is not None:
                 threading.Thread(target=monitor_restart, daemon=True).start()
 
-            # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
-            try:
-                subprocess.run(["tmux", "attach-session", "-t", session_name])
-            except OSError:
-                if not monitor_killed.is_set() and not (
-                    restart_event is not None and restart_event.is_set()
-                ):
-                    raise
+            detached_wrapper = os.environ.get("AGENTCHATTR_DETACHED_WRAPPER") == "1"
+            if sys.stdin.isatty() and not detached_wrapper:
+                # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
+                try:
+                    subprocess.run(["tmux", "attach-session", "-t", session_name])
+                except OSError:
+                    if not monitor_killed.is_set() and not (
+                        restart_event is not None and restart_event.is_set()
+                    ):
+                        raise
+            else:
+                # Managed/background wrappers have no controlling terminal.
+                # Keep the wrapper alive so queue injection, proxy, and
+                # heartbeats continue while the tmux session runs detached.
+                print(f"  Running detached. Reattach: tmux attach -t {session_name}")
 
             if monitor_killed.is_set() or (
                 restart_event is not None and restart_event.is_set()

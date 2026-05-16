@@ -163,13 +163,26 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
 _VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag", "env_content"}
 
 
+def _provider_key(agent: str, agent_cfg: dict) -> str:
+    """Return the underlying CLI provider for an agent instance.
+
+    Project-specific agents are often named like "gemini-refactor", while the
+    command remains "gemini". Provider defaults must follow the command, not the
+    instance name.
+    """
+    command_name = Path(agent_cfg.get("command", agent)).name
+    return command_name or agent
+
+
 def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
-    """Resolve MCP injection config: explicit agent_cfg > built-in defaults > None."""
+    """Resolve MCP injection config: explicit agent_cfg > provider defaults > None."""
     inject_mode = agent_cfg.get("mcp_inject")
     if inject_mode:
         return dict(agent_cfg)
-    if agent in _BUILTIN_DEFAULTS:
-        merged = dict(_BUILTIN_DEFAULTS[agent])
+    provider = _provider_key(agent, agent_cfg)
+    default_key = agent if agent in _BUILTIN_DEFAULTS else provider
+    if default_key in _BUILTIN_DEFAULTS:
+        merged = dict(_BUILTIN_DEFAULTS[default_key])
         merged.update({k: v for k, v in agent_cfg.items() if k.startswith("mcp_")})
         return merged
     return {}
@@ -362,6 +375,8 @@ def _build_provider_launch(
 
     launch_args = [*mcp_args, *extra_args]
     launch_env = dict(env)
+    if _provider_key(agent, agent_cfg) == "gemini":
+        inject_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 
     return launch_args, launch_env, inject_env, settings_path
 
@@ -740,7 +755,7 @@ def main():
 
     # Gemini: ensure the project directory is trusted so MCPs are allowed.
     # Gemini blocks ALL MCPs for untrusted folders — even system-settings ones.
-    if agent == "gemini" or inject_cfg.get("mcp_inject") == "env":
+    if _provider_key(agent, agent_cfg) == "gemini" or inject_cfg.get("mcp_inject") == "env":
         _ensure_gemini_folder_trusted(project_dir)
 
     launch_args, env, inject_env, mcp_settings_path = _build_provider_launch(

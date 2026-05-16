@@ -32,4 +32,4 @@ if %errorlevel% neq 0 (
     goto :wait_server
 )
 
-python wrapper.py gemini -- --yolo
+python wrapper.py gemini -- --approval-mode=yolo --skip-trust

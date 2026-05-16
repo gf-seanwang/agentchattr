@@ -61,4 +61,4 @@ if ! is_server_running; then
     done
 fi
 
-.venv/bin/python wrapper.py gemini -- --yolo
+.venv/bin/python wrapper.py gemini -- --approval-mode=yolo --skip-trust

@@ -2311,6 +2311,8 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         # Clear reserved names so new register gets slot 1
         registry.clear_reserved_for(agent_name)
 
+        import re as _re_mod
+
         # Kill orphan managed tmux sessions from previous server runs
         try:
             result = _sp.run(["tmux", "ls", "-F", "#{session_name}"], capture_output=True, text=True, timeout=3)
@@ -2326,7 +2328,6 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         venv_python = root / "venv" / "bin" / "python"
         python = str(venv_python) if venv_python.exists() else _sys.executable
 
-        import re as _re_mod
         import uuid as _uuid
         safe_name = _re_mod.sub(r"[^a-zA-Z0-9_.-]", "_", agent_name)[:60]
         managed_id = _uuid.uuid4().hex[:8]
@@ -2349,10 +2350,13 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         cmd_name = Path(agent_command).name or agent_command
         is_claude = cmd_name == "claude"
         is_codex = cmd_name == "codex"
+        is_gemini = cmd_name == "gemini"
         if is_claude:
             cmd.append("--dangerously-skip-permissions")
         elif is_codex:
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        elif is_gemini:
+            cmd.extend(["--approval-mode=yolo", "--skip-trust"])
         log_path = _wrapper_log_dir() / f"{safe_name}-{managed_id}.log"
         try:
             log_file = open(log_path, "a", buffering=1)
