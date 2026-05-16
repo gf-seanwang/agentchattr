@@ -54,12 +54,34 @@ def main():
 
     config = load_config(ROOT)
 
+    # Load project files and merge agents
+    from config_loader import load_projects
+    projects, project_warnings = load_projects(ROOT)
+    project_channels = {}
+    for channel, project in projects.items():
+        channel_agents_list = []
+        for agent_name, agent_cfg in project.get("agents", {}).items():
+            if agent_name not in config.get("agents", {}):
+                config.setdefault("agents", {})[agent_name] = agent_cfg
+                channel_agents_list.append(agent_name)
+            else:
+                channel_agents_list.append(agent_name)
+        project_channels[channel] = channel_agents_list
+    if project_warnings:
+        for w in project_warnings:
+            logging.getLogger(__name__).warning("Project: %s", w)
+
     # --- Security: generate a random session token (in-memory only) ---
     session_token = secrets.token_hex(32)
 
     # Configure the FastAPI app (creates shared store)
     from app import app, configure, set_event_loop, store as _store_ref
     configure(config, session_token=session_token)
+
+    # Apply project channel settings
+    from app import _apply_project_channels
+    if project_channels:
+        _apply_project_channels(project_channels, valid_agents=set(config.get("agents", {}).keys()))
 
     # Share stores with the MCP bridge
     from app import store, rules, summaries, jobs, room_settings, registry, router as app_router, agents as app_agents, session_engine, session_store
@@ -120,6 +142,25 @@ def main():
         # Resume any sessions that were active before restart
         if session_engine:
             session_engine.resume_active_sessions()
+        # Auto-start TG bridge if configured
+        try:
+            from tg_bridge import TGBridge, load_config, check_config, validate_runtime
+            from app import _tg_bridge_lock, room_settings, store, registry
+            import app as _app
+            errors = check_config()
+            if not errors:
+                cfg = load_config()
+                if cfg:
+                    rt_errors, rt_warnings = validate_runtime(cfg, room_settings)
+                    if not rt_errors:
+                        with _tg_bridge_lock:
+                            _app._tg_bridge = TGBridge(cfg, store, registry, room_settings)
+                            _app._tg_bridge.start()
+                        logging.getLogger(__name__).info("TG Bridge auto-started for #%s", cfg.get("channel", "?"))
+                    elif rt_warnings:
+                        logging.getLogger(__name__).warning("TG Bridge config warnings: %s", rt_warnings)
+        except Exception as e:
+            logging.getLogger(__name__).warning("TG Bridge auto-start skipped: %s", e)
 
     # Run web server
     import uvicorn

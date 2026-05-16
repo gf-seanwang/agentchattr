@@ -259,6 +259,44 @@ async function restartChannelWrappers(channel) {
     }
 }
 
+// --- TG Bridge ---
+window.window._tgBridgeState = { running: false, channel: null };
+
+async function fetchTgBridgeHealth() {
+    try {
+        const resp = await fetch('/api/tg-bridge/health', {
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
+        window._tgBridgeState = await resp.json();
+    } catch (e) {
+        window._tgBridgeState = { running: false, channel: null };
+    }
+    renderChannelTabs();
+}
+
+async function toggleTgBridge(channel) {
+    if (window._tgBridgeState.running && window._tgBridgeState.channel === channel) {
+        const resp = await fetch('/api/tg-bridge/stop', {
+            method: 'POST',
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
+        const data = await resp.json();
+        console.log('TG Bridge stopped:', data);
+    } else {
+        const resp = await fetch('/api/tg-bridge/start', {
+            method: 'POST',
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
+        const data = await resp.json();
+        if (data.error) {
+            alert('TG Bridge: ' + data.error);
+        } else {
+            console.log('TG Bridge started:', data);
+        }
+    }
+    await fetchTgBridgeHealth();
+}
+
 async function refreshSkills() {
     try {
         await fetch('/api/skills/refresh', {
@@ -507,6 +545,7 @@ function init() {
     Jobs.init();
     Sessions.init();
     Channels.init();
+    fetchTgBridgeHealth();
     checkForUpdate();
 
     // Dismiss channel edit controls when clicking outside channel bar

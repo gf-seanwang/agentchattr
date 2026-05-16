@@ -82,6 +82,15 @@ function renderChannelTabs() {
             restartBtn.onclick = (e) => { e.stopPropagation(); restartChannelWrappers(name); };
             actions.appendChild(restartBtn);
 
+            const tgBtn = document.createElement('button');
+            tgBtn.className = 'ch-tg-btn';
+            const tgActive = window._tgBridgeState && window._tgBridgeState.running && window._tgBridgeState.channel === name;
+            tgBtn.classList.toggle('active', tgActive);
+            tgBtn.title = tgActive ? 'Stop TG Bridge' : 'Start TG Bridge';
+            tgBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            tgBtn.onclick = (e) => { e.stopPropagation(); toggleTgBridge(name); };
+            actions.appendChild(tgBtn);
+
             const delBtn = document.createElement('button');
             delBtn.className = 'ch-delete-btn';
             delBtn.title = 'Delete';
