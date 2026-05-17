@@ -367,6 +367,7 @@ def configure(cfg: dict, session_token: str = ""):
                 # it's dead — deregister it to free the slot.
                 _CRASH_TIMEOUT = 15
                 registered = set(registry.get_all_names())
+                renamed_any = False
                 for name in registered:
                     with mcp_bridge._presence_lock:
                         last_seen = mcp_bridge._presence.get(name, 0)
@@ -378,20 +379,26 @@ def configure(cfg: dict, session_token: str = ""):
                             registry.clean_renames_for(name)
                             renamed = result.get("_renamed_back")
                             if renamed:
-                                mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
-                                store.rename_sender(renamed["old"], renamed["new"])
-                                if _event_loop:
-                                    rename_event = json.dumps({
-                                        "type": "agent_renamed",
-                                        "old_name": renamed["old"],
-                                        "new_name": renamed["new"],
-                                    })
-                                    asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
+                                _apply_renamed_back(renamed)
+                                renamed_any = True
                             store.add(name, f"{name} disconnected (timeout)", msg_type="leave", channel=_last_active_channel)
                             _posted_leave.add(name)
 
-                # Re-fetch registered names (may have changed from crash timeout above)
+                # Re-fetch registered names (may have changed from crash timeout above).
+                # Also recompute currently_online if crash-timeout triggered renamed_back —
+                # migrate_identity moved presence to the new name, so the pre-rename snapshot
+                # would otherwise treat the renamed instance as disconnected.
                 registered = set(registry.get_all_names())
+                if renamed_any:
+                    with mcp_bridge._presence_lock:
+                        currently_online = {
+                            name for name, ts in mcp_bridge._presence.items()
+                            if now - ts < mcp_bridge.PRESENCE_TIMEOUT
+                        }
+                        currently_active = {
+                            name for name, active in mcp_bridge._activity.items()
+                            if active and now - mcp_bridge._activity_ts.get(name, 0) < mcp_bridge.ACTIVITY_TIMEOUT
+                        }
 
                 # Detect registered instances going offline (leave message only)
                 timed_out = registered - currently_online
@@ -884,6 +891,21 @@ async def broadcast(msg: dict):
         except Exception:
             dead.add(client)
     ws_clients.difference_update(dead)
+
+
+def _apply_renamed_back(renamed: dict):
+    """Propagate a registry rename to mcp_bridge, store, and UI."""
+    import mcp_bridge as _mb
+    _mb.migrate_identity(renamed["old"], renamed["new"])
+    if store:
+        store.rename_sender(renamed["old"], renamed["new"])
+    if _event_loop:
+        rename_event = json.dumps({
+            "type": "agent_renamed",
+            "old_name": renamed["old"],
+            "new_name": renamed["new"],
+        })
+        asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
 
 
 async def broadcast_status():
@@ -2294,6 +2316,12 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         entry = _managed_wrappers.get(agent_name)
         if entry and entry.get("state") == "cleanup_failed":
             return "error", entry.get("cleanup_error", "previous cleanup failed")
+        # If a managed wrapper is alive but its registered name drifted to slot 2+
+        # (slot 1 was orphaned without renamed_back), heal it before deciding to skip.
+        if _managed_wrapper_alive(agent_name) and registry:
+            renamed = registry.reconcile_to_base(agent_name)
+            if renamed:
+                _apply_renamed_back(renamed)
         if _managed_wrapper_alive(agent_name):
             return "skipped", "already_managed"
 
@@ -2958,6 +2986,9 @@ async def heartbeat(agent_name: str, request: Request):
                 body["runtime_session"],
                 body.get("runtime_backend", "tmux"),
             )
+        if "model" in body:
+            if not mcp_bridge._agent_models.get(current_name):
+                mcp_bridge._agent_models[current_name] = body["model"]
     except Exception:
         pass  # No body = plain heartbeat
     # Immediately broadcast on activity state change (don't wait for background checker)

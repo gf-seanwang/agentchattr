@@ -601,6 +601,14 @@ def main():
     parser.add_argument("--tmux-session", default=None, help="Override tmux session name (used by managed launch)")
     args, extra = parser.parse_known_args()
 
+    # Parse --model from extra args (passed by managed launcher)
+    _launch_model = None
+    for _i, _a in enumerate(extra):
+        if _a == "--model" and _i + 1 < len(extra):
+            _launch_model = extra[_i + 1]
+        elif _a.startswith("--model="):
+            _launch_model = _a.split("=", 1)[1]
+
     if args.tmux_session:
         import re as _re_validate
         if not _re_validate.match(r'^[A-Za-z0-9_.-]{1,100}$', args.tmux_session):
@@ -804,6 +812,8 @@ def main():
                 if _runtime_session[0]:
                     hb_data["runtime_session"] = _runtime_session[0]
                     hb_data["runtime_backend"] = _runtime_backend[0]
+                if _launch_model:
+                    hb_data["model"] = _launch_model
                 req = urllib.request.Request(
                     url,
                     method="POST",

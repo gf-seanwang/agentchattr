@@ -34,6 +34,8 @@ _presence_lock = threading.Lock()   # guards both _presence and _activity
 _renamed_from: set[str] = set()    # old names from renames — suppress leave messages
 _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → last_id}
 _cursors_lock = threading.Lock()
+_agent_models: dict[str, str] = {}          # agent_name → current model (active this turn)
+_agent_models_pending: dict[str, str] = {}  # agent_name → model switch pending for next turn
 _empty_read_count: dict[str, int] = {}  # sender → consecutive empty reads
 # Last channel (or job_id) each agent explicitly read from. chat_send
 # falls back to this when the caller omits the channel/job_id, so agents
@@ -120,7 +122,14 @@ _MCP_INSTRUCTIONS = (
     "This prevents over-use of the jobs feature for vague requests.\n\n"
     "To post a suggestion (Accept/Dismiss card) in a job, prefix your message with [suggestion]: "
     "chat_send(job_id=N, message='[suggestion] I recommend we refactor the auth module'). "
-    "The human can Accept (triggers you with context) or Dismiss."
+    "The human can Accept (triggers you with context) or Dismiss.\n\n"
+    "Model switching (Claude Code only):\n"
+    "Use chat_set_model when the task type changes and a different model would serve better.\n"
+    "  - 'opus'   → complex reasoning, architecture decisions, hard debugging, multi-step planning\n"
+    "  - 'sonnet' → general coding, analysis, implementation (default for most tasks)\n"
+    "  - 'haiku'  → simple lookups, formatting, repetitive or mechanical tasks\n"
+    "Switch proactively — don't wait to be asked. If you're starting a deep architecture review, switch to opus. "
+    "If you finish complex reasoning and move to routine implementation, switch back to sonnet."
 )
 
 # --- Tool implementations (shared between both servers) ---
@@ -336,15 +345,21 @@ def chat_send(
 
     # Determine message type and metadata based on choices
     msg_type = "chat"
-    metadata = None
+    metadata = {}
     clean_choices = [c for c in (choices if choices else []) if isinstance(c, str) and c.strip()]
     if clean_choices:
         msg_type = "decision"
-        metadata = {"choices": clean_choices, "resolved": False}
+        metadata["choices"] = clean_choices
+        metadata["resolved"] = False
+    current_model = _agent_models.get(sender, "")
+    if current_model:
+        metadata["model"] = current_model
+    if not metadata:
+        metadata = None
 
     msg = store.add(sender, message.strip(), attachments=attachments,
                     reply_to=reply_id, channel=channel,
-                    msg_type=msg_type, metadata=metadata)
+                    msg_type=msg_type, metadata=metadata or None)
     _update_cursor(sender, [msg], channel)
     with _presence_lock:
         _presence[sender] = time.time()
@@ -513,6 +528,10 @@ def migrate_identity(old_name: str, new_name: str):
     if old_name in _roles:
         _roles[new_name] = _roles.pop(old_name)
         _save_roles()
+    if old_name in _agent_models:
+        _agent_models[new_name] = _agent_models.pop(old_name)
+    if old_name in _agent_models_pending:
+        _agent_models_pending[new_name] = _agent_models_pending.pop(old_name)
     _save_cursors()
 
 
@@ -527,6 +546,8 @@ def purge_identity(name: str):
     if name in _roles:
         del _roles[name]
         _save_roles()
+    _agent_models.pop(name, None)
+    _agent_models_pending.pop(name, None)
     _save_cursors()
 
 
@@ -577,6 +598,10 @@ def chat_read(
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
     if err:
         return err
+
+    # Promote any pending model switch — the new turn means the switch is now active
+    if sender and sender in _agent_models_pending:
+        _agent_models[sender] = _agent_models_pending.pop(sender)
 
     # Job-scoped read: return job metadata plus the thread messages
     if job_id and jobs:
@@ -926,9 +951,70 @@ def chat_summary(
     return f"Unknown action: {action}. Valid actions: read, write."
 
 
+def chat_set_model(
+    sender: str,
+    model: str,
+    reason: str = "",
+    ctx: Context | None = None,
+) -> str:
+    """Switch your Claude Code model mid-session without restarting.
+
+    Call this when task complexity changes:
+      - "opus"   → architecture decisions, hard debugging, multi-step reasoning
+      - "sonnet" → most coding, analysis, implementation (default)
+      - "haiku"  → simple lookups, formatting, mechanical tasks
+
+    Also accepts full model names (e.g. "claude-opus-4-7", "claude-sonnet-4-6").
+    The switch takes effect at the next prompt — current response finishes first.
+
+    Args:
+        sender: Your agent name.
+        model: Model alias ("opus", "sonnet", "haiku") or full model name.
+        reason: Brief note explaining the switch (logged to chat).
+    """
+    sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
+    if err:
+        return err
+
+    if not registry:
+        return "Error: registry not available."
+
+    inst = registry.get_instance(sender)
+    if not inst:
+        return f"Error: unknown agent {sender}."
+
+    base_cfg = registry.get_base_config(inst["base"]) or {}
+    command = base_cfg.get("command", "")
+    from pathlib import Path as _Path
+    if _Path(command).stem != "claude" and command != "claude":
+        return "Error: chat_set_model is only supported for Claude Code agents."
+
+    runtime_session = inst.get("runtime_session", "")
+    if not runtime_session:
+        return "Error: no active tmux session — is the wrapper running?"
+
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["tmux", "send-keys", "-t", runtime_session, f"/model {model}", "Enter"],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            return f"Error: tmux rejected the command (session '{runtime_session}' may be stale): {stderr}"
+    except Exception as exc:
+        return f"Error injecting model switch: {exc}"
+
+    _agent_models_pending[sender] = model  # activates at next turn's chat_read
+    note = f" — {reason}" if reason else ""
+    if store:
+        store.add(sender, f"Switching to model: {model}{note}", msg_type="system", channel="")
+    return f"Switching to '{model}'{note}. Takes effect at next prompt."
+
+
 _ALL_TOOLS = [
     chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
-    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job,
+    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job, chat_set_model,
 ]
 
 

@@ -319,6 +319,42 @@ class RuntimeRegistry:
             result["_renamed_back"] = renamed_back
         return result
 
+    def reconcile_to_base(self, base: str) -> dict | None:
+        """If the family for `base` has exactly one instance not named `base`,
+        rename it back to `base`. Returns {"old": ..., "new": ...} or None.
+
+        Heals states where slot 1 disappeared without triggering renamed_back
+        (e.g., process killed before deregister, or slot freed by other paths).
+        """
+        with self._lock:
+            if base not in self._bases:
+                return None
+            if base in self._instances:
+                return None  # slot 1 occupied
+            self._expire_reserved()
+            if base in self._reserved:
+                return None  # slot 1 in grace period — don't reclaim yet
+            family = [i for i in self._instances.values() if i.base == base]
+            if len(family) != 1:
+                return None
+            remaining = family[0]
+            r_base, _ = self._parse_name(remaining.name)
+            if r_base != base or remaining.name == base:
+                return None
+            old_name = remaining.name
+            del self._instances[old_name]
+            remaining.name = base
+            remaining.slot = 1
+            base_cfg = self._bases.get(base, {})
+            remaining.label = base_cfg.get("label", base.capitalize())
+            remaining.color = _derive_color(base_cfg.get("color", "#888"), 1)
+            self._instances[base] = remaining
+            self._renames[old_name] = base
+            renamed = {"old": old_name, "new": base}
+        self._notify()
+        self._save_renames()
+        return renamed
+
     # --- Identity Claim ---
 
     def claim(self, sender: str, target_name: str | None = None) -> dict | str:
