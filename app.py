@@ -42,6 +42,12 @@ session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
+_session_epochs: dict[str, float] = {}  # agent_name → monotonic epoch from wrapper
+
+
+def _migrate_session_epoch(old_name: str, new_name: str):
+    if old_name in _session_epochs:
+        _session_epochs[new_name] = _session_epochs.pop(old_name)
 
 # --- Security: session token (set by configure()) ---
 session_token: str = ""
@@ -897,6 +903,7 @@ def _apply_renamed_back(renamed: dict):
     """Propagate a registry rename to mcp_bridge, store, and UI."""
     import mcp_bridge as _mb
     _mb.migrate_identity(renamed["old"], renamed["new"])
+    _migrate_session_epoch(renamed["old"], renamed["new"])
     if store:
         store.rename_sender(renamed["old"], renamed["new"])
     if _event_loop:
@@ -1399,6 +1406,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Migrate presence + cursors to new name
                             import mcp_bridge
                             mcp_bridge.migrate_identity(agent_name, new_id)
+                            _migrate_session_epoch(agent_name, new_id)
                             # Update sender on all historical messages
                             store.rename_sender(agent_name, new_id)
                             # Migrate channel_agents membership
@@ -1445,6 +1453,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 registry.confirm_pending(new_id)
                                 import mcp_bridge
                                 mcp_bridge.migrate_identity(agent_name, new_id)
+                                _migrate_session_epoch(agent_name, new_id)
                                 # Update sender on all historical messages
                                 store.rename_sender(agent_name, new_id)
                                 rename_event = json.dumps({
@@ -2398,6 +2407,10 @@ def _launch_managed_wrapper(agent_name: str, channel: str | None = None) -> tupl
         cmd_name = Path(agent_command).name or agent_command
         is_claude = cmd_name == "claude"
         is_codex = cmd_name == "codex"
+        if base_cfg.get("model") and (is_claude or is_codex):
+            cmd.extend(["--model", base_cfg["model"]])
+        if base_cfg.get("effort") and is_claude:
+            cmd.extend(["--effort", base_cfg["effort"]])
         is_gemini = cmd_name == "gemini"
         if is_claude:
             cmd.append("--dangerously-skip-permissions")
@@ -2490,6 +2503,7 @@ def _stop_managed_wrapper(agent_name: str) -> tuple[str, str]:
                     if dereg_result and dereg_result.get("_renamed_back"):
                         renamed = dereg_result["_renamed_back"]
                         mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+                        _migrate_session_epoch(renamed["old"], renamed["new"])
                         store.rename_sender(renamed["old"], renamed["new"])
                         if _event_loop:
                             import asyncio
@@ -2862,6 +2876,7 @@ async def register_agent(request: Request):
     renamed = result.pop("_renamed_slot1", None)
     if renamed:
         mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+        _migrate_session_epoch(renamed["old"], renamed["new"])
         store.rename_sender(renamed["old"], renamed["new"])
         if _event_loop:
             rename_event = json.dumps({
@@ -2901,11 +2916,13 @@ async def deregister_agent(name: str, request: Request):
     # Clean up runtime state (presence, activity, cursors, rename chains)
     import mcp_bridge
     mcp_bridge.purge_identity(name)
+    _session_epochs.pop(name, None)
     registry.clean_renames_for(name)
     # If the remaining instance was renamed back (e.g. "claude-1" → "claude"), migrate state
     renamed = result.pop("_renamed_back", None)
     if renamed:
         mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+        _migrate_session_epoch(renamed["old"], renamed["new"])
         store.rename_sender(renamed["old"], renamed["new"])
         if _event_loop:
             rename_event = json.dumps({
@@ -2948,6 +2965,7 @@ async def rename_agent_label(name: str, request: Request):
 
     import mcp_bridge
     mcp_bridge.migrate_identity(name, new_id)
+    _migrate_session_epoch(name, new_id)
     # Update sender on all historical messages
     store.rename_sender(name, new_id)
     return JSONResponse({"ok": True, "new_name": new_id})
@@ -2986,9 +3004,18 @@ async def heartbeat(agent_name: str, request: Request):
                 body["runtime_session"],
                 body.get("runtime_backend", "tmux"),
             )
+        new_epoch = body.get("session_epoch", 0)
+        if new_epoch:
+            old_epoch = _session_epochs.get(current_name, 0)
+            if old_epoch and old_epoch != new_epoch:
+                mcp_bridge.clear_session_model_effort_state(current_name)
+            _session_epochs[current_name] = new_epoch
+            mcp_bridge.set_session_epoch(current_name, new_epoch)
         if "model" in body:
             if not mcp_bridge._agent_models.get(current_name):
                 mcp_bridge._agent_models[current_name] = body["model"]
+        if "effort" in body:
+            mcp_bridge.apply_startup_effort(current_name, body["effort"])
     except Exception:
         pass  # No body = plain heartbeat
     # Immediately broadcast on activity state change (don't wait for background checker)

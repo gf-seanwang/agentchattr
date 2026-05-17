@@ -96,6 +96,7 @@ def run_agent(
     inject_env=None,
     inject_delay: float = 0.3,
     restart_event=None,
+    on_session_start=None,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -164,6 +165,9 @@ def run_agent(
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
+
+            if on_session_start is not None:
+                on_session_start(session_name)
 
             if restart_event is not None:
                 threading.Thread(target=monitor_restart, daemon=True).start()

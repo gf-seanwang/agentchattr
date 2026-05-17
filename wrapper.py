@@ -601,13 +601,31 @@ def main():
     parser.add_argument("--tmux-session", default=None, help="Override tmux session name (used by managed launch)")
     args, extra = parser.parse_known_args()
 
-    # Parse --model from extra args (passed by managed launcher)
+    # Parse --model and --effort from extra args (passed by managed launcher).
+    # --model is kept in extra so it reaches the CLI (valid provider flag).
+    # --effort is stripped — wrapper-only metadata; effort is applied at
+    # runtime via /effort inside the session, not as a startup flag.
     _launch_model = None
+    _launch_effort = None
+    _filtered_extra = []
+    _drop_next = False  # True = next token is the value of a stripped flag
     for _i, _a in enumerate(extra):
-        if _a == "--model" and _i + 1 < len(extra):
-            _launch_model = extra[_i + 1]
-        elif _a.startswith("--model="):
-            _launch_model = _a.split("=", 1)[1]
+        if _drop_next:
+            _drop_next = False
+            continue  # drop the value of --effort
+        if _a == "--effort" and _i + 1 < len(extra):
+            _launch_effort = extra[_i + 1]
+            _drop_next = True           # strip flag + value
+        elif _a.startswith("--effort="):
+            _launch_effort = _a.split("=", 1)[1]
+            # strip --effort=value (don't append)
+        else:
+            if _a == "--model" and _i + 1 < len(extra):
+                _launch_model = extra[_i + 1]
+            elif _a.startswith("--model="):
+                _launch_model = _a.split("=", 1)[1]
+            _filtered_extra.append(_a)  # keep everything that isn't --effort
+    extra = _filtered_extra
 
     if args.tmux_session:
         import re as _re_validate
@@ -796,6 +814,8 @@ def main():
     _reconnecting = [False]
     _runtime_session = [""]
     _runtime_backend = [""]
+    _effort_confirmed = [False]
+    _session_epoch = [0]  # monotonic timestamp set on each new tmux session
 
     def _request_restart(reason: str):
         if _restart_reason[0] != "server_lost":
@@ -812,8 +832,12 @@ def main():
                 if _runtime_session[0]:
                     hb_data["runtime_session"] = _runtime_session[0]
                     hb_data["runtime_backend"] = _runtime_backend[0]
+                if _session_epoch[0]:
+                    hb_data["session_epoch"] = _session_epoch[0]
                 if _launch_model:
                     hb_data["model"] = _launch_model
+                if _launch_effort and _effort_confirmed[0]:
+                    hb_data["effort"] = _launch_effort
                 req = urllib.request.Request(
                     url,
                     method="POST",
@@ -965,6 +989,55 @@ def main():
         _runtime_session[0] = unix_session_name
         _runtime_backend[0] = "tmux"
 
+    _is_claude = Path(command).stem == "claude" or command == "claude"
+
+    def _mark_effort_unconfirmed():
+        _effort_confirmed[0] = False
+
+    def _mark_effort_confirmed():
+        _effort_confirmed[0] = True
+
+    def _inject_effort_at_startup(session: str, effort: str):
+        """After Claude starts, send /effort and auto-confirm the dialog."""
+        import subprocess as _sp2
+        time.sleep(3)
+        # The skip-permissions confirmation dialog (shown when claude is launched
+        # with --dangerously-skip-permissions) also contains the word "claude",
+        # so a naive substring check can fire while the dialog is still open and
+        # /effort gets dropped into it. Wait until that dialog is gone AND a real
+        # prompt indicator is visible. app.py's auto-accept thread dismisses the
+        # dialog at T+~10s, so allow up to 30s.
+        ready_to_try = False
+        for _ in range(60):  # up to 30s
+            time.sleep(0.5)
+            r = _sp2.run(["tmux", "capture-pane", "-t", session, "-p"],
+                         capture_output=True, timeout=5)
+            if r.returncode != 0:
+                continue
+            pane = r.stdout.decode(errors="replace")
+            if ("Bypass Permissions" in pane
+                    or "No, exit" in pane
+                    or "Do you trust" in pane):
+                continue
+            if "? for shortcuts" in pane or "? for help" in pane:
+                ready_to_try = True
+                break
+        if not ready_to_try:
+            print(f"  Warning: effort injection skipped — Claude session '{session}' did not become ready")
+            return
+        _sp2.run(["tmux", "send-keys", "-t", session, f"/effort {effort}", "Enter"],
+                 capture_output=True, timeout=5)
+        for _ in range(20):  # up to 10s
+            time.sleep(0.5)
+            r = _sp2.run(["tmux", "capture-pane", "-t", session, "-p"],
+                         capture_output=True, timeout=5)
+            if "Change effort level" in r.stdout.decode(errors="replace"):
+                _sp2.run(["tmux", "send-keys", "-t", session, "Enter"],
+                         capture_output=True, timeout=5)
+                _mark_effort_confirmed()
+                return
+        print(f"  Warning: effort dialog not confirmed for session '{session}' — effort may not be applied")
+
     run_kwargs = dict(
         command=command,
         extra_args=launch_args,
@@ -985,6 +1058,14 @@ def main():
         run_kwargs["enter_backend"] = agent_cfg.get("enter_backend", "console_input")
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        def _on_session_start(s):
+            _effort_confirmed[0] = False
+            _session_epoch[0] = time.monotonic()
+            if _launch_effort and _is_claude:
+                threading.Thread(
+                    target=_inject_effort_at_startup, args=(s, _launch_effort), daemon=True,
+                ).start()
+        run_kwargs["on_session_start"] = _on_session_start
 
     def rebuild_launch_for_current_identity():
         nonlocal env, inject_env, mcp_settings_path, unix_session_name

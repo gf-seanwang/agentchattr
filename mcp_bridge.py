@@ -36,6 +36,11 @@ _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → las
 _cursors_lock = threading.Lock()
 _agent_models: dict[str, str] = {}          # agent_name → current model (active this turn)
 _agent_models_pending: dict[str, str] = {}  # agent_name → model switch pending for next turn
+_agent_efforts: dict[str, str] = {}         # agent_name → current effort level
+_agent_efforts_pending: dict[str, str] = {} # agent_name → effort switch pending for next turn
+_agent_effort_sources: dict[str, str] = {}          # agent_name → "startup" | "tool"
+_agent_effort_sources_pending: dict[str, str] = {}  # agent_name → pending source
+_agent_session_epochs: dict[str, float] = {}        # agent_name → current session epoch
 _empty_read_count: dict[str, int] = {}  # sender → consecutive empty reads
 # Last channel (or job_id) each agent explicitly read from. chat_send
 # falls back to this when the caller omits the channel/job_id, so agents
@@ -129,7 +134,19 @@ _MCP_INSTRUCTIONS = (
     "  - 'sonnet' → general coding, analysis, implementation (default for most tasks)\n"
     "  - 'haiku'  → simple lookups, formatting, repetitive or mechanical tasks\n"
     "Switch proactively — don't wait to be asked. If you're starting a deep architecture review, switch to opus. "
-    "If you finish complex reasoning and move to routine implementation, switch back to sonnet."
+    "If you finish complex reasoning and move to routine implementation, switch back to sonnet.\n\n"
+    "Effort switching (Claude Code only):\n"
+    "Use chat_set_effort when you need more or less reasoning depth.\n"
+    "  - 'low'    → simple, fast tasks\n"
+    "  - 'medium' → default balanced reasoning\n"
+    "  - 'high'   → harder problems needing deeper analysis\n"
+    "  - 'xhigh'  → very hard multi-step reasoning (Opus 4.7 only)\n"
+    "  - 'max'    → maximum reasoning, unlimited token budget\n"
+    "Switch effort to match the task: bump to 'max' for a hard bug or architecture decision, drop to 'low' for mechanical tasks.\n\n"
+    "IMPORTANT — never edit ~/.claude/settings.json to change model or effort. "
+    "That file is global and affects all Claude Code sessions on this machine. "
+    "Use chat_set_model and chat_set_effort instead — they change only the current session via /model and /effort commands. "
+    "If you need a persistent project-scoped setting, write to .claude/settings.json inside the project's cwd, NOT ~/.claude/settings.json."
 )
 
 # --- Tool implementations (shared between both servers) ---
@@ -354,6 +371,9 @@ def chat_send(
     current_model = _agent_models.get(sender, "")
     if current_model:
         metadata["model"] = current_model
+    current_effort = _agent_efforts.get(sender, "")
+    if current_effort and current_effort != "medium":
+        metadata["effort"] = current_effort
     if not metadata:
         metadata = None
 
@@ -532,6 +552,16 @@ def migrate_identity(old_name: str, new_name: str):
         _agent_models[new_name] = _agent_models.pop(old_name)
     if old_name in _agent_models_pending:
         _agent_models_pending[new_name] = _agent_models_pending.pop(old_name)
+    if old_name in _agent_efforts:
+        _agent_efforts[new_name] = _agent_efforts.pop(old_name)
+    if old_name in _agent_efforts_pending:
+        _agent_efforts_pending[new_name] = _agent_efforts_pending.pop(old_name)
+    if old_name in _agent_effort_sources:
+        _agent_effort_sources[new_name] = _agent_effort_sources.pop(old_name)
+    if old_name in _agent_effort_sources_pending:
+        _agent_effort_sources_pending[new_name] = _agent_effort_sources_pending.pop(old_name)
+    if old_name in _agent_session_epochs:
+        _agent_session_epochs[new_name] = _agent_session_epochs.pop(old_name)
     _save_cursors()
 
 
@@ -548,7 +578,36 @@ def purge_identity(name: str):
         _save_roles()
     _agent_models.pop(name, None)
     _agent_models_pending.pop(name, None)
+    _agent_efforts.pop(name, None)
+    _agent_efforts_pending.pop(name, None)
+    _agent_effort_sources.pop(name, None)
+    _agent_effort_sources_pending.pop(name, None)
+    _agent_session_epochs.pop(name, None)
     _save_cursors()
+
+
+def set_session_epoch(name: str, epoch: float):
+    """Set the current session epoch for an agent (no-op if epoch is falsey)."""
+    if epoch:
+        _agent_session_epochs[name] = epoch
+
+
+def clear_session_model_effort_state(name: str):
+    """Drop all per-session model/effort state for an agent."""
+    _agent_models.pop(name, None)
+    _agent_models_pending.pop(name, None)
+    _agent_efforts.pop(name, None)
+    _agent_efforts_pending.pop(name, None)
+    _agent_effort_sources.pop(name, None)
+    _agent_effort_sources_pending.pop(name, None)
+
+
+def apply_startup_effort(name: str, effort: str):
+    """Record a confirmed startup effort; never overwrites a tool-set effort."""
+    source = _agent_effort_sources.get(name)
+    if source in (None, "", "startup"):
+        _agent_efforts[name] = effort
+        _agent_effort_sources[name] = "startup"
 
 
 def migrate_cursors_rename(old_name: str, new_name: str):
@@ -599,9 +658,13 @@ def chat_read(
     if err:
         return err
 
-    # Promote any pending model switch — the new turn means the switch is now active
+    # Promote any pending model/effort switch — the new turn means the switch is now active
     if sender and sender in _agent_models_pending:
         _agent_models[sender] = _agent_models_pending.pop(sender)
+    if sender and sender in _agent_efforts_pending:
+        _agent_efforts[sender] = _agent_efforts_pending.pop(sender)
+        if sender in _agent_effort_sources_pending:
+            _agent_effort_sources[sender] = _agent_effort_sources_pending.pop(sender)
 
     # Job-scoped read: return job metadata plus the thread messages
     if job_id and jobs:
@@ -1012,9 +1075,110 @@ def chat_set_model(
     return f"Switching to '{model}'{note}. Takes effect at next prompt."
 
 
+def chat_set_effort(
+    sender: str,
+    effort: str,
+    reason: str = "",
+    ctx: Context | None = None,
+) -> str:
+    """Switch your Claude Code reasoning effort mid-session without restarting.
+
+    Call this when task complexity changes:
+      - "low"    → simple, fast tasks
+      - "medium" → default balanced reasoning
+      - "high"   → harder problems needing deeper analysis
+      - "xhigh"  → very hard multi-step reasoning (Opus 4.7 only)
+      - "max"    → maximum reasoning, unlimited token budget
+
+    Args:
+        sender: Your agent name.
+        effort: Effort level ("low", "medium", "high", "xhigh", "max").
+        reason: Brief note explaining the switch (logged to chat).
+    """
+    sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
+    if err:
+        return err
+
+    if not registry:
+        return "Error: registry not available."
+
+    inst = registry.get_instance(sender)
+    if not inst:
+        return f"Error: unknown agent {sender}."
+
+    base_cfg = registry.get_base_config(inst["base"]) or {}
+    command = base_cfg.get("command", "")
+    from pathlib import Path as _Path
+    if _Path(command).stem != "claude" and command != "claude":
+        return "Error: chat_set_effort is only supported for Claude Code agents."
+
+    _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+    if effort not in _VALID_EFFORTS:
+        return f"Error: invalid effort '{effort}'. Valid values: {', '.join(sorted(_VALID_EFFORTS))}"
+
+    runtime_session = inst.get("runtime_session", "")
+    if not runtime_session:
+        return "Error: no active tmux session — is the wrapper running?"
+
+    expected_epoch = _agent_session_epochs.get(sender, 0)
+    if not expected_epoch:
+        return "Error: no session epoch yet — wait for wrapper heartbeat and try again."
+
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["tmux", "send-keys", "-t", runtime_session, f"/effort {effort}", "Enter"],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            return f"Error: tmux rejected the command (session '{runtime_session}' may be stale): {stderr}"
+        # Auto-confirm runs async — the /effort command is only processed
+        # after this MCP tool returns control to the CLI.
+        import threading as _threading, time as _time
+        _note = f" — {reason}" if reason else ""
+        _sender = sender
+        _eff = effort
+        _expected_session = runtime_session
+        _expected_epoch = expected_epoch
+        def _confirm():
+            for _ in range(40):  # up to 20s
+                _time.sleep(0.5)
+                r = _sp.run(
+                    ["tmux", "capture-pane", "-t", _expected_session, "-p"],
+                    capture_output=True, timeout=5,
+                )
+                if "Change effort level" in r.stdout.decode(errors="replace"):
+                    _sp.run(["tmux", "send-keys", "-t", _expected_session, "Enter"],
+                            capture_output=True, timeout=5)
+                    # Session guard: epoch is the source of truth, runtime_session is an additional check
+                    inst = registry.get_instance(_sender) if registry else None
+                    current_epoch = _agent_session_epochs.get(_sender, 0)
+                    if (not inst
+                            or inst.get("runtime_session") != _expected_session
+                            or current_epoch != _expected_epoch):
+                        if store:
+                            store.add(_sender, f"Warning: effort switch to '{_eff}' abandoned because the session changed",
+                                      msg_type="system", channel="")
+                        return
+                    _agent_efforts_pending[_sender] = _eff
+                    _agent_effort_sources_pending[_sender] = "tool"
+                    if store:
+                        store.add(_sender, f"Switching to effort: {_eff}{_note}", msg_type="system", channel="")
+                    return
+            if store:
+                store.add(_sender, f"Warning: effort switch to '{_eff}' not confirmed", msg_type="system", channel="")
+        _threading.Thread(target=_confirm, daemon=True).start()
+    except Exception as exc:
+        return f"Error injecting effort switch: {exc}"
+
+    return f"Requested effort switch to '{effort}'. It will be marked active after confirmation."
+
+
 _ALL_TOOLS = [
     chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
-    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job, chat_set_model,
+    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job,
+    chat_set_model, chat_set_effort,
 ]
 
 
