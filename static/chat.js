@@ -1187,7 +1187,9 @@ function appendMessage(msg) {
     syncInterruptButtons();
 
     if (autoScroll) {
-        scrollToBottom();
+        // Skip per-message scroll during initial history load / reconnect replay —
+        // the final status event runs scrollToBottom once, avoiding visible "scroll-down" reflow.
+        if (soundEnabled) scrollToBottom();
     } else {
         unreadCount++;
         updateScrollAnchor();

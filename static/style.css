@@ -706,7 +706,6 @@ main#timeline {
     overflow-y: auto;
     overflow-x: hidden;
     padding: 16px;
-    scroll-behavior: smooth;
     min-width: 0;
     height: 100%;
 }
