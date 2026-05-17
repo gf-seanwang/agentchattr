@@ -379,7 +379,7 @@ def chat_send(
     if current_model:
         metadata["model"] = current_model
     current_effort = _agent_efforts.get(sender, "")
-    if current_effort and current_effort != "medium":
+    if current_effort:
         metadata["effort"] = current_effort
     if not metadata:
         metadata = None

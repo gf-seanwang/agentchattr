@@ -602,30 +602,20 @@ def main():
     args, extra = parser.parse_known_args()
 
     # Parse --model and --effort from extra args (passed by managed launcher).
-    # --model is kept in extra so it reaches the CLI (valid provider flag).
-    # --effort is stripped — wrapper-only metadata; effort is applied at
-    # runtime via /effort inside the session, not as a startup flag.
+    # Both flags are kept in extra so they reach the CLI directly — Claude CLI
+    # supports both as startup flags (claude --help: --model, --effort). We
+    # only record the values for heartbeat reporting.
     _launch_model = None
     _launch_effort = None
-    _filtered_extra = []
-    _drop_next = False  # True = next token is the value of a stripped flag
     for _i, _a in enumerate(extra):
-        if _drop_next:
-            _drop_next = False
-            continue  # drop the value of --effort
-        if _a == "--effort" and _i + 1 < len(extra):
+        if _a == "--model" and _i + 1 < len(extra):
+            _launch_model = extra[_i + 1]
+        elif _a.startswith("--model="):
+            _launch_model = _a.split("=", 1)[1]
+        elif _a == "--effort" and _i + 1 < len(extra):
             _launch_effort = extra[_i + 1]
-            _drop_next = True           # strip flag + value
         elif _a.startswith("--effort="):
             _launch_effort = _a.split("=", 1)[1]
-            # strip --effort=value (don't append)
-        else:
-            if _a == "--model" and _i + 1 < len(extra):
-                _launch_model = extra[_i + 1]
-            elif _a.startswith("--model="):
-                _launch_model = _a.split("=", 1)[1]
-            _filtered_extra.append(_a)  # keep everything that isn't --effort
-    extra = _filtered_extra
 
     if args.tmux_session:
         import re as _re_validate
@@ -1059,12 +1049,11 @@ def main():
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
         def _on_session_start(s):
-            _effort_confirmed[0] = False
+            # Claude CLI now accepts --effort as a startup flag, so passing the
+            # flag through is enough — the value is active before the prompt
+            # appears. Skip /effort injection.
+            _effort_confirmed[0] = bool(_launch_effort and _is_claude)
             _session_epoch[0] = time.monotonic()
-            if _launch_effort and _is_claude:
-                threading.Thread(
-                    target=_inject_effort_at_startup, args=(s, _launch_effort), daemon=True,
-                ).start()
         run_kwargs["on_session_start"] = _on_session_start
 
     def rebuild_launch_for_current_identity():
