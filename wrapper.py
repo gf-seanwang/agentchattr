@@ -470,97 +470,128 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
                    refresh_interval: int = 10, stop_event=None):
     """Poll queue file and inject an MCP read task when triggered."""
+    from queue_utils import claim_queue_file
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
+    # NOTE: recovery of leftover .processing.* files happens once at full
+    # process startup (see main()), not here. start_watcher() can swap
+    # watcher threads while a previous watcher is still handling a live
+    # .processing file; running recovery on every watcher start would
+    # requeue and unlink that live file, causing duplicate injections.
     while not (stop_event and stop_event.is_set()):
         try:
             _, queue_file = get_identity_fn()
-            if queue_file.exists() and queue_file.stat().st_size > 0:
-                with open(queue_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                queue_file.write_text("", "utf-8")
+            processing = claim_queue_file(queue_file)
+            if processing is not None:
+                handled = False
+                try:
+                    lines = processing.read_text(encoding="utf-8").splitlines(keepends=True)
 
-                has_trigger = False
-                channel = "general"
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    has_trigger = True
-                    if isinstance(data, dict) and "channel" in data:
-                        channel = data["channel"]
-
-                if has_trigger:
-                    # Signal activity BEFORE injecting — covers the thinking phase
-                    if trigger_flag is not None:
-                        trigger_flag[0] = True
-                    time.sleep(0.5)
-
-                    # Check if this is a job/activity-scoped trigger
-                    job_id = None
-                    custom_prompt = ""
+                    has_trigger = False
+                    channel = "general"
+                    trigger_ids = []
                     for line in lines:
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             data = json.loads(line)
-                            if isinstance(data, dict) and "job_id" in data:
-                                job_id = data["job_id"]
-                            if isinstance(data, dict):
-                                raw_prompt = data.get("prompt", "")
-                                if isinstance(raw_prompt, str) and raw_prompt.strip():
-                                    custom_prompt = raw_prompt.strip()
                         except json.JSONDecodeError:
-                            pass
+                            continue
+                        has_trigger = True
+                        if isinstance(data, dict):
+                            if "channel" in data:
+                                channel = data["channel"]
+                            tid = data.get("trigger_id")
+                            if tid:
+                                trigger_ids.append(tid)
 
-                    if custom_prompt:
-                        prompt = custom_prompt
-                    elif job_id:
-                        prompt = f"use mcp to read job_id={job_id} - you're mentioned in a job thread, take appropriate action and respond"
-                    else:
-                        prompt = f"use mcp to read #{channel} - you're mentioned, take appropriate action and respond"
+                    if has_trigger:
+                        if trigger_ids:
+                            print(f"  Claimed trigger_ids={','.join(trigger_ids)} ch=#{channel}")
+                        # Signal activity BEFORE injecting — covers the thinking phase
+                        if trigger_flag is not None:
+                            trigger_flag[0] = True
+                        time.sleep(0.5)
 
-                    # Use current identity (may have changed via rename)
-                    current_name, _ = get_identity_fn()
-                    # Append role if set — check both current name and base name
-                    role = _fetch_role(server_port, current_name)
-                    if not role and current_name != agent_name:
-                        role = _fetch_role(server_port, agent_name)
-                    if role:
-                        prompt += f"\n\nROLE: {role}"
+                        # Check if this is a job/activity-scoped trigger
+                        job_id = None
+                        custom_prompt = ""
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                                if isinstance(data, dict) and "job_id" in data:
+                                    job_id = data["job_id"]
+                                if isinstance(data, dict):
+                                    raw_prompt = data.get("prompt", "")
+                                    if isinstance(raw_prompt, str) and raw_prompt.strip():
+                                        custom_prompt = raw_prompt.strip()
+                            except json.JSONDecodeError:
+                                pass
 
-                    # Smart rules injection: first trigger, epoch change, or periodic refresh
-                    _token = get_token_fn() if get_token_fn else ""
-                    rules_data = _fetch_active_rules(server_port, _token)
-                    trigger_count += 1
-                    if rules_data:
-                        # Use server-side refresh_interval (live from settings UI)
-                        ri = rules_data.get("refresh_interval", refresh_interval)
-                        need_inject = (
-                            last_rules_epoch == 0
-                            or rules_data["epoch"] != last_rules_epoch
-                            or (ri > 0 and trigger_count % ri == 0)
-                        )
-                        if need_inject:
-                            if rules_data["rules"]:
-                                rules_text = "; ".join(rules_data["rules"])
-                                prompt += f"\n\nRULES:\n{rules_text}"
-                            last_rules_epoch = rules_data["epoch"]
-                            _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+                        if custom_prompt:
+                            prompt = custom_prompt
+                        elif job_id:
+                            prompt = f"use mcp to read job_id={job_id} - you're mentioned in a job thread, take appropriate action and respond"
+                        else:
+                            prompt = f"use mcp to read #{channel} - you're mentioned, take appropriate action and respond"
 
-                    if first_mention and is_multi_instance:
-                        prompt += _IDENTITY_HINT
-                        first_mention = False
-                    # Flatten to single line — multi-line text triggers paste
-                    # detection in CLIs (Claude Code shows "[Pasted text +N]")
-                    # which can break injection of long session prompts
-                    inject_fn(prompt.replace("\n", " "))
+                        # Use current identity (may have changed via rename)
+                        current_name, _ = get_identity_fn()
+                        # Append role if set — check both current name and base name
+                        role = _fetch_role(server_port, current_name)
+                        if not role and current_name != agent_name:
+                            role = _fetch_role(server_port, agent_name)
+                        if role:
+                            prompt += f"\n\nROLE: {role}"
+
+                        # Smart rules injection: first trigger, epoch change, or periodic refresh
+                        _token = get_token_fn() if get_token_fn else ""
+                        rules_data = _fetch_active_rules(server_port, _token)
+                        trigger_count += 1
+                        if rules_data:
+                            # Use server-side refresh_interval (live from settings UI)
+                            ri = rules_data.get("refresh_interval", refresh_interval)
+                            need_inject = (
+                                last_rules_epoch == 0
+                                or rules_data["epoch"] != last_rules_epoch
+                                or (ri > 0 and trigger_count % ri == 0)
+                            )
+                            if need_inject:
+                                if rules_data["rules"]:
+                                    rules_text = "; ".join(rules_data["rules"])
+                                    prompt += f"\n\nRULES:\n{rules_text}"
+                                last_rules_epoch = rules_data["epoch"]
+                                _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+
+                        if first_mention and is_multi_instance:
+                            prompt += _IDENTITY_HINT
+                            first_mention = False
+                        # Flatten to single line — multi-line text triggers paste
+                        # detection in CLIs (Claude Code shows "[Pasted text +N]")
+                        # which can break injection of long session prompts
+                        inject_fn(prompt.replace("\n", " "))
+                        if trigger_ids:
+                            print(f"  Injected trigger_ids={','.join(trigger_ids)} → {current_name}")
+
+                    # No exception raised — either has_trigger=True and inject_fn
+                    # completed, or has_trigger=False (empty/malformed-only file
+                    # with nothing useful to retry). Either way we can safely
+                    # unlink the processing file.
+                    handled = True
+                except Exception as exc:
+                    print(f"  Warning: trigger handling raised, leaving {processing.name} "
+                          f"on disk for recovery on next startup: {exc}")
+
+                if handled:
+                    try:
+                        processing.unlink()
+                    except FileNotFoundError:
+                        pass
         except Exception:
             pass
 
@@ -754,8 +785,8 @@ def main():
         return changed
 
     queue_file = _identity["queue"]
-    if queue_file.exists():
-        queue_file.write_text("", "utf-8")
+    from queue_utils import recover_processing_files
+    recover_processing_files(queue_file)
 
     strip_vars = {"CLAUDECODE"} | set(agent_cfg.get("strip_env", []))
     env = {k: v for k, v in os.environ.items() if k not in strip_vars}

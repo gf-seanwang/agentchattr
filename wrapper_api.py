@@ -273,13 +273,16 @@ def main():
         return messages
 
     # Handle a trigger — read context, call model, respond
-    def handle_trigger(channel="general"):
+    def handle_trigger(channel="general") -> bool:
+        """Return True if the trigger was handled (or is a benign no-op),
+        False on unexpected exceptions. The consumer uses this signal to
+        decide whether to delete the claimed `.processing.*` file."""
         my_name = get_name()
         set_working(True)
         try:
             chat_msgs = read_messages(channel=channel, limit=context_messages)
             if not chat_msgs:
-                return
+                return True  # nothing to read — no useful retry
 
             messages = format_messages(chat_msgs)
             print(f"  [{channel}] Calling model with {len(messages)} messages...")
@@ -287,7 +290,7 @@ def main():
             response = call_model(messages)
             response = response.strip()
             if not response:
-                return
+                return True  # empty model response — retrying won't help
 
             # Strip self-prefix if the model echoes its own name
             prefixes = [f"{my_name}: ", f"{my_name}:"]
@@ -298,15 +301,17 @@ def main():
 
             send_message(response, channel=channel)
             print(f"  [{channel}] Responded ({len(response)} chars)")
+            return True
         except Exception as exc:
             print(f"  Error handling trigger: {exc}")
+            return False
         finally:
             set_working(False)
 
     # Queue watcher — polls queue file for @mentions
+    from queue_utils import append_queue_line, claim_queue_file, recover_processing_files
     queue_file = data_dir / f"{name}_queue.jsonl"
-    if queue_file.exists():
-        queue_file.write_text("", "utf-8")
+    recover_processing_files(queue_file)
 
     print(f"\n  === {agent_cfg.get('label', agent)} API Wrapper ===")
     print(f"  Model endpoint: {base_url}/chat/completions")
@@ -322,25 +327,72 @@ def main():
                 current_name = get_name()
                 qf = data_dir / f"{current_name}_queue.jsonl"
 
-                if qf.exists() and qf.stat().st_size > 0:
-                    with open(qf, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                    qf.write_text("", "utf-8")
+                processing = claim_queue_file(qf)
+                if processing is not None:
+                    consumed = False
+                    try:
+                        lines = processing.read_text(encoding="utf-8").splitlines(keepends=True)
 
-                    channels_triggered = set()
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
+                        # Group lines by channel so we can requeue failed
+                        # channels individually without replaying successful ones.
+                        channel_lines: dict[str, list[str]] = {}
+                        trigger_ids = []
+                        for raw in lines:
+                            stripped = raw.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                data = json.loads(stripped)
+                                ch = data.get("channel", "general") if isinstance(data, dict) else "general"
+                                if isinstance(data, dict):
+                                    tid = data.get("trigger_id")
+                                    if tid:
+                                        trigger_ids.append(tid)
+                            except json.JSONDecodeError:
+                                ch = "general"
+                            channel_lines.setdefault(ch, []).append(
+                                raw if raw.endswith("\n") else raw + "\n"
+                            )
+
+                        if trigger_ids:
+                            print(f"  Claimed trigger_ids={','.join(trigger_ids)} chs={list(channel_lines.keys())}")
+
+                        # Per-channel handling: failed channels get their lines
+                        # appended back to the queue file for the next poll.
+                        # NOTE: append+fsync happens before unlink below, so failed
+                        # lines are durably re-queued. A narrow at-least-once window
+                        # remains if the process crashes between the append-back
+                        # loop and the unlink — startup recovery would then append
+                        # the original `.processing.*` once more, producing a
+                        # duplicate. Acceptable under at-least-once semantics.
+                        failed_lines: list[str] = []
+                        for ch, ch_lines in channel_lines.items():
+                            if not handle_trigger(channel=ch):
+                                failed_lines.extend(ch_lines)
+
+                        if failed_lines:
+                            for fl in failed_lines:
+                                append_queue_line(qf, fl.rstrip("\n"))
+                            print(f"  Warning: requeued {len(failed_lines)} line(s) "
+                                  f"from {processing.name} (channel handler returned False)")
+                        elif trigger_ids:
+                            print(f"  Injected trigger_ids={','.join(trigger_ids)} → {current_name}")
+
+                        # Handler-level outcome processed (success, partial,
+                        # or all-fail); the processing file may now be removed.
+                        consumed = True
+                    except Exception as exc:
+                        # Read or unexpected consumer exception — leave the
+                        # whole `.processing.*` file on disk for startup
+                        # recovery on the next process boot.
+                        print(f"  Warning: trigger handling raised, leaving {processing.name} "
+                              f"on disk for recovery on next startup: {exc}")
+
+                    if consumed:
                         try:
-                            data = json.loads(line)
-                            ch = data.get("channel", "general") if isinstance(data, dict) else "general"
-                            channels_triggered.add(ch)
-                        except json.JSONDecodeError:
-                            channels_triggered.add("general")
-
-                    for ch in channels_triggered:
-                        handle_trigger(channel=ch)
+                            processing.unlink()
+                        except FileNotFoundError:
+                            pass
             except Exception:
                 pass
 

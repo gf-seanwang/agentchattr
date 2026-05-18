@@ -2,7 +2,10 @@
 
 import json
 import logging
+import uuid
 from pathlib import Path
+
+from queue_utils import append_queue_line
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,9 @@ class AgentTrigger:
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         import time
+        trigger_id = uuid.uuid4().hex
         entry = {
+            "trigger_id": trigger_id,
             "sender": message.split(":")[0].strip() if ":" in message else "?",
             "text": message,
             "time": time.strftime("%H:%M:%S"),
@@ -48,10 +53,10 @@ class AgentTrigger:
         if job_id is not None:
             entry["job_id"] = job_id
 
-        with open(queue_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        append_queue_line(queue_file, json.dumps(entry))
 
-        log.info("Queued @%s trigger (ch=%s, job=%s): %s", agent_name, channel, job_id, message[:80])
+        log.info("Queued trigger_id=%s @%s (ch=%s, job=%s): %s",
+                 trigger_id, agent_name, channel, job_id, message[:80])
 
     def trigger_sync(self, agent_name: str, message: str = "", channel: str = "general",
                      job_id: int | None = None, **kwargs):
@@ -60,7 +65,9 @@ class AgentTrigger:
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         import time
+        trigger_id = uuid.uuid4().hex
         entry = {
+            "trigger_id": trigger_id,
             "sender": message.split(":")[0].strip() if ":" in message else "?",
             "text": message,
             "time": time.strftime("%H:%M:%S"),
@@ -72,7 +79,7 @@ class AgentTrigger:
         if job_id is not None:
             entry["job_id"] = job_id
 
-        with open(queue_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        append_queue_line(queue_file, json.dumps(entry))
 
-        log.info("Queued @%s trigger (ch=%s, job=%s): %s", agent_name, channel, job_id, message[:80])
+        log.info("Queued trigger_id=%s @%s (ch=%s, job=%s): %s",
+                 trigger_id, agent_name, channel, job_id, message[:80])
